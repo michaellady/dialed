@@ -116,6 +116,42 @@ TF
   fi
 fi
 
+# Hook for database: append shared outputs so PR stacks can consume
+if [ "$NAME" = "database" ]; then
+  outputs_marker="# dialed:add-module:database:outputs"
+  if ! grep -Fq "$outputs_marker" terraform/shared/outputs.tf 2>/dev/null; then
+    cat >> terraform/shared/outputs.tf <<TF
+
+${outputs_marker}
+output "database_endpoint" {
+  value       = module.${ALIAS}.endpoint
+  description = "RDS hostname (from dialed:add-module database)."
+}
+
+output "database_port" {
+  value       = module.${ALIAS}.port
+  description = "Postgres port."
+}
+
+output "database_name" {
+  value       = module.${ALIAS}.database_name
+  description = "Admin/root database name."
+}
+
+output "database_master_secret_arn" {
+  value       = module.${ALIAS}.master_secret_arn
+  description = "ARN of the Secrets Manager secret with master credentials. Consumed by per_pr_database in the stack."
+}
+
+output "database_security_group_id" {
+  value       = module.${ALIAS}.security_group_id
+  description = "SG of the RDS instance. Your app's SG needs egress to 5432 against this."
+}
+TF
+    echo "✓ appended database_* outputs to terraform/shared/outputs.tf"
+  fi
+fi
+
 # Hook for database: also install per_pr_database into the stack
 if [ "$NAME" = "database" ]; then
   per_pr="$DIALED_HOME/skill/templates/terraform/modules/per_pr_database"
