@@ -1,0 +1,140 @@
+name: dialed-setup
+description: >
+  Load .dialed.yml, derive the correct AWS deploy role + TF workspace for
+  the current env & PR context, assume the role via GitHub OIDC, and
+  install Terraform. Consumed by every DIALED-generated deploy workflow.
+  The calling workflow MUST set `permissions: { id-token: write, contents: read }`.
+
+inputs:
+  env:
+    description: "Which env this job is operating on: dev, staging, or prod."
+    required: true
+  terraform_version:
+    description: "Terraform version to install. Default matches DIALED's pinned version."
+    required: false
+    default: "1.6.6"
+
+outputs:
+  account_id:
+    description: "The AWS account ID derived from account_ids[env]."
+    value: ${{ steps.derive.outputs.account_id }}
+  role_arn:
+    description: "The deploy role ARN that was assumed."
+    value: ${{ steps.derive.outputs.role_arn }}
+  workspace:
+    description: "The Terraform workspace name (env for pushes, env-pr-<N> for PRs)."
+    value: ${{ steps.derive.outputs.workspace }}
+  project_name:
+    description: "project_name from .dialed.yml — often useful downstream."
+    value: ${{ steps.derive.outputs.project_name }}
+
+runs:
+  using: composite
+  steps:
+    - name: Validate env input
+      shell: bash
+      run: |
+        case "${{ inputs.env }}" in
+          dev|staging|prod) ;;
+          *) echo "::error::env must be one of dev, staging, prod (got '${{ inputs.env }}')"; exit 1 ;;
+        esac
+
+    - name: Install yq
+      shell: bash
+      run: |
+        if command -v yq >/dev/null 2>&1; then
+          echo "yq already installed: $(yq --version)"
+          exit 0
+        fi
+        # yq v4 is a single Go binary. Pin for reproducibility.
+        curl -sSL -o /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
+        chmod +x /usr/local/bin/yq
+        yq --version
+
+    - name: Derive env-specific values
+      id: derive
+      shell: bash
+      env:
+        ENV: ${{ inputs.env }}
+      run: |
+        set -euo pipefail
+        if [ ! -f .dialed.yml ]; then
+          echo "::error::.dialed.yml not found at repo root. Run dialed:setup first."
+          exit 1
+        fi
+
+        project_name=$(yq -r '.project_name' .dialed.yml)
+        aws_region=$(yq -r '.aws_region' .dialed.yml)
+        account_id=$(yq -r ".account_ids.${ENV}" .dialed.yml)
+        domain=$(yq -r '.domain // ""' .dialed.yml)
+
+        if [ -z "$account_id" ] || [ "$account_id" = "null" ]; then
+          echo "::error::account_ids.${ENV} is missing from .dialed.yml"
+          exit 1
+        fi
+
+        # Role ARN convention — must match bootstrap TF's naming
+        role_arn="arn:aws:iam::${account_id}:role/dialed/dialed-deploy-${ENV}"
+
+        # Workspace derivation:
+        #   PR event  → {env}-pr-{PR_NUMBER}  (PR stacks)
+        #   push event → {env}                (shared env stacks)
+        case "${GITHUB_EVENT_NAME}" in
+          pull_request|pull_request_target)
+            workspace="${ENV}-pr-${{ github.event.pull_request.number }}"
+            ;;
+          *)
+            workspace="${ENV}"
+            ;;
+        esac
+
+        # Export everything, both for downstream steps and as step outputs
+        {
+          echo "DIALED_PROJECT_NAME=${project_name}"
+          echo "DIALED_ACCOUNT_ID=${account_id}"
+          echo "DIALED_ROLE_ARN=${role_arn}"
+          echo "DIALED_WORKSPACE=${workspace}"
+          echo "DIALED_DOMAIN=${domain}"
+          echo "DIALED_ENV=${ENV}"
+          echo "AWS_REGION=${aws_region}"
+          echo "TF_WORKSPACE=${workspace}"
+        } >> "$GITHUB_ENV"
+
+        {
+          echo "account_id=${account_id}"
+          echo "role_arn=${role_arn}"
+          echo "workspace=${workspace}"
+          echo "project_name=${project_name}"
+        } >> "$GITHUB_OUTPUT"
+
+        echo ""
+        echo "DIALED context:"
+        echo "  project:   ${project_name}"
+        echo "  env:       ${ENV}"
+        echo "  account:   ${account_id}"
+        echo "  region:    ${aws_region}"
+        echo "  workspace: ${workspace}"
+        echo "  role:      ${role_arn}"
+
+    - name: Assume AWS deploy role via OIDC
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ steps.derive.outputs.role_arn }}
+        aws-region: ${{ env.AWS_REGION }}
+        role-session-name: dialed-${{ inputs.env }}-${{ github.run_id }}
+
+    - name: Install Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ inputs.terraform_version }}
+        terraform_wrapper: false
+
+    - name: Export .dialed.yml as tfvars.json
+      shell: bash
+      run: |
+        # Every TF call (bootstrap, stack, shared) auto-loads any
+        # *.auto.tfvars.json in its working dir. Generate one from .dialed.yml
+        # so Terraform sees every config field without separate -var flags.
+        mkdir -p .dialed-cache
+        yq -o=json . .dialed.yml > .dialed-cache/dialed.auto.tfvars.json
+        echo "Generated .dialed-cache/dialed.auto.tfvars.json"
