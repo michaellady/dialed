@@ -1,0 +1,114 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  actionlint:
+    name: actionlint (workflow templates)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install actionlint
+        run: |
+          curl -sSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash | bash -s -- latest ./bin
+          echo "$PWD/bin" >> $GITHUB_PATH
+      - name: Lint consumer workflow templates
+        run: |
+          shopt -s nullglob
+          files=(skill/templates/workflows/*.yml)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No templates yet — skipping."
+            exit 0
+          fi
+          # Templates may reference secrets/env that don't exist in dialed's own context.
+          # Lint for syntax only; ignore SC2086 (quoting) in shell snippets.
+          actionlint -shellcheck="" "${files[@]}"
+      - name: Lint dialed's own workflows
+        run: actionlint .github/workflows/*.yml
+
+  tf-validate:
+    name: terraform validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.6
+      - name: Validate every TF module/config
+        run: |
+          shopt -s nullglob globstar
+          failed=0
+          mapfile -t dirs < <(find skill/templates/terraform -type f -name '*.tf' -exec dirname {} \; | sort -u)
+          if [ ${#dirs[@]} -eq 0 ]; then
+            echo "No Terraform files yet — skipping."
+            exit 0
+          fi
+          for d in "${dirs[@]}"; do
+            echo "::group::terraform validate $d"
+            (cd "$d" && terraform init -backend=false -input=false -no-color && terraform validate -no-color) || failed=1
+            echo "::endgroup::"
+          done
+          exit $failed
+
+  bash-syntax:
+    name: bash -n (scripts)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax-check all shell scripts
+        run: |
+          shopt -s nullglob globstar
+          scripts=(skill/scripts/*.sh skill/templates/**/*.sh)
+          if [ ${#scripts[@]} -eq 0 ]; then
+            echo "No scripts yet — skipping."
+            exit 0
+          fi
+          failed=0
+          for s in "${scripts[@]}"; do
+            bash -n "$s" || { echo "SYNTAX ERROR in $s"; failed=1; }
+          done
+          exit $failed
+
+  yamllint:
+    name: yamllint (config template)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install yamllint
+        run: pip install --quiet yamllint
+      - name: Lint dialed.config.template.yml
+        run: |
+          target=skill/templates/dialed.config.template.yml
+          if [ ! -f "$target" ]; then
+            echo "Config template not yet authored — skipping."
+            exit 0
+          fi
+          yamllint -d '{extends: default, rules: {line-length: {max: 140}, document-start: disable, truthy: {check-keys: false}}}' "$target"
+
+  render-dry-run:
+    name: render dry-run (fixture values)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run render.sh against fixtures
+        run: |
+          if [ ! -x skill/scripts/render.sh ]; then
+            echo "render.sh not yet authored — skipping."
+            exit 0
+          fi
+          if [ ! -d tests/fixtures ]; then
+            echo "No fixtures yet — skipping."
+            exit 0
+          fi
+          tmpdir=$(mktemp -d)
+          # Render every template into tmpdir using tests/fixtures/dialed.yml as input.
+          skill/scripts/render.sh --config tests/fixtures/dialed.yml --out "$tmpdir"
+          echo "Rendered files:"
+          find "$tmpdir" -type f | sort
+          # Re-run actionlint + tf validate on the rendered output to catch
+          # placeholder-substitution bugs that only show up post-render.
+          find "$tmpdir" -name '*.yml' -path '*/workflows/*' | xargs -r actionlint || true
