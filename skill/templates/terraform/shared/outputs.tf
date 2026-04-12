@@ -39,3 +39,30 @@ output "cleanup_lambda_name" {
   value       = aws_lambda_function.cleanup.function_name
   description = "Name of the orphan-cleanup Lambda. pr-cleanup.yml invokes this when terraform destroy fails."
 }
+
+# ─── Database outputs (present when dialed:add-module database is installed) ─
+
+output "database_endpoint" {
+  value       = try(module.database.endpoint, null)
+  description = "RDS hostname. null until the database module is added."
+}
+
+output "database_port" {
+  value       = try(module.database.port, null)
+  description = "Postgres port. null until the database module is added."
+}
+
+output "database_name" {
+  value       = try(module.database.database_name, null)
+  description = "Admin/root database name. null until the database module is added."
+}
+
+output "database_master_secret_arn" {
+  value       = try(module.database.master_secret_arn, null)
+  description = "ARN of the Secrets Manager secret with master creds. Consumed by per_pr_database in the stack."
+}
+
+output "database_security_group_id" {
+  value       = try(module.database.security_group_id, null)
+  description = "SG of the RDS instance. Add egress rules from your app's SG to this on port 5432."
+}
