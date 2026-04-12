@@ -69,7 +69,32 @@ marker="# dialed:add-module:${ALIAS}"
 if grep -Fq "$marker" terraform/shared/main.tf; then
   echo "✓ module block for '$ALIAS' already present in shared/main.tf — skipping inject"
 else
-  cat >> terraform/shared/main.tf <<TF
+  case "$NAME" in
+    database)
+      # Fully-wired block — database is a DIALED-shipped module with known inputs.
+      cat >> terraform/shared/main.tf <<TF
+
+${marker}
+module "${ALIAS}" {
+  source = "../modules/${NAME}"
+
+  name_prefix        = local.name_prefix
+  environment        = var.environment
+  vpc_id             = module.network.vpc_id
+  private_subnet_ids = module.network.private_subnet_ids
+  vpc_cidr_block     = module.network.vpc_cidr_block
+  tags               = local.common_tags
+
+  # Defaults: db.t4g.micro (~\$12/mo), 20GB gp3, single-AZ, 7-day backups.
+  # Override for prod: uncomment and tune.
+  # instance_class         = "db.t4g.small"
+  # multi_az               = true
+  # backup_retention_days  = 30
+}
+TF
+      ;;
+    *)
+      cat >> terraform/shared/main.tf <<TF
 
 ${marker}
 module "${ALIAS}" {
@@ -83,34 +108,44 @@ module "${ALIAS}" {
   #   tags               = local.common_tags
 }
 TF
+      ;;
+  esac
   echo "✓ appended module block to terraform/shared/main.tf"
-  echo "  → Edit the TODO block to pass this module its required inputs before the next apply."
+  if [ "$NAME" != "database" ]; then
+    echo "  → Edit the TODO block to pass this module its required inputs before the next apply."
+  fi
 fi
 
-# Hook for database: install per_pr_database into the stack
+# Hook for database: also install per_pr_database into the stack
 if [ "$NAME" = "database" ]; then
   per_pr="$DIALED_HOME/skill/templates/terraform/modules/per_pr_database"
   if [ -d "$per_pr" ]; then
     mkdir -p terraform/modules
     [ ! -d terraform/modules/per_pr_database ] && cp -r "$per_pr" terraform/modules/
+    echo "✓ installed modules/per_pr_database/"
     stack_marker="# dialed:add-module:per_pr_db"
     if ! grep -Fq "$stack_marker" terraform/stack/main.tf 2>/dev/null; then
       cat >> terraform/stack/main.tf <<'TF'
 
 # dialed:add-module:per_pr_db
-# Per-PR Postgres logical DB, created on apply and dropped on destroy. Only
-# active when this is a per-PR stack (var.pr_number != "").
+# Per-PR Postgres logical DB, created on apply and dropped on destroy.
+# Active only on PR stacks (var.pr_number != ""). Your app resources
+# should pull the connection string from module.per_pr_db[0].connection_string
+# (or build their own from .username/.password/.database_name).
 module "per_pr_db" {
   count  = var.pr_number != "" ? 1 : 0
   source = "../modules/per_pr_database"
 
   pr_number         = var.pr_number
-  rds_endpoint      = data.terraform_remote_state.shared[0].outputs.database_endpoint
+  endpoint          = data.terraform_remote_state.shared[0].outputs.database_endpoint
+  port              = data.terraform_remote_state.shared[0].outputs.database_port
   master_secret_arn = data.terraform_remote_state.shared[0].outputs.database_master_secret_arn
 }
 TF
       echo "✓ appended per_pr_db module to terraform/stack/main.tf"
     fi
+  else
+    echo "::warning::modules/per_pr_database not shipped with this DIALED version. pr_<N> DBs won't be created automatically."
   fi
 fi
 

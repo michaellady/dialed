@@ -7,7 +7,11 @@ description: Wire a module into an existing DIALED shared tier. Supports DIALED-
 
 Copies a module into `terraform/modules/`, adds it to `terraform/shared/main.tf`, and exposes its outputs from `terraform/shared/outputs.tf`. Then (after user confirmation) runs `terraform apply` on the shared tier.
 
-v1 ships one DIALED-owned module: `network` (already installed by `dialed:setup` when `needs_vpc=y`). M2 adds `database` (RDS + per-PR logical DB). Custom modules are supported from day one: pass a path to a module directory, and DIALED wires it in the same way.
+DIALED-owned modules:
+- `network` — VPC + fck-nat, installed at setup when `needs_vpc=y`.
+- `database` — RDS Postgres + per-PR logical DB helper (as of v2).
+
+Custom modules supported from day one: pass a path to a module directory, and DIALED wires it in the same way.
 
 ## Preconditions
 
@@ -19,7 +23,7 @@ v1 ships one DIALED-owned module: `network` (already installed by `dialed:setup`
 
 1. **Module name** — ask the user. Valid values:
     - `network` — already installed at setup; re-running updates the existing module (e.g. after editing the shipped version). Confirm this is the intent.
-    - `database` — M2; RDS cluster + per-PR logical DB helper. Ship-detect: check `$DIALED_HOME/skill/templates/terraform/modules/database/` exists. If not, tell the user the module hasn't shipped yet.
+    - `database` — RDS Postgres + per-PR logical DB. Defaults to db.t4g.micro single-AZ (~$12/mo dev); instance_class / multi_az configurable in terraform/shared/main.tf.
     - **path to custom module** — any directory containing a valid Terraform module. DIALED copies it into `terraform/modules/<basename>/`.
 
 2. **Module alias** (if custom) — short name used as the TF module block's label (e.g. `module "cache" { source = "../modules/my_redis" }`). Default: basename of the source path.
