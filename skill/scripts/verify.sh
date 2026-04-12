@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+# verify.sh — Check a DIALED-ified project against expected AWS + filesystem state.
+#
+# Reports drift; does NOT fix anything. Exit 0 if all checks pass, non-zero
+# otherwise. Run from the project's root directory.
+
+set -uo pipefail
+
+if [ -z "${DIALED_HOME:-}" ]; then
+  script="${BASH_SOURCE[0]}"
+  while [ -L "$script" ]; do
+    dir="$(cd -P "$(dirname "$script")" && pwd)"
+    script="$(readlink "$script")"
+    [[ "$script" != /* ]] && script="$dir/$script"
+  done
+  DIALED_HOME="$(cd -P "$(dirname "$script")/../.." && pwd)"
+fi
+export DIALED_HOME
+
+if [ ! -f .dialed.yml ]; then
+  echo "✗ .dialed.yml not found. This project isn't DIALED-ified."
+  exit 1
+fi
+
+PROJECT=$(yq -r '.project_name' .dialed.yml)
+REGION=$(yq -r '.aws_region' .dialed.yml)
+GITHUB_REPO=$(yq -r '.github_repo' .dialed.yml)
+ENV_MODEL=$(yq -r '.env_model' .dialed.yml)
+NEEDS_VPC=$(yq -r '.needs_vpc' .dialed.yml)
+STALE_WARN=$(yq -r '.enable_stale_pr_warning' .dialed.yml)
+
+if [ "$ENV_MODEL" = "3-env" ]; then
+  ENVS=(dev staging prod)
+else
+  ENVS=(dev prod)
+fi
+
+declare -A env_to_account
+for env in "${ENVS[@]}"; do
+  env_to_account[$env]=$(yq -r ".account_ids.${env}" .dialed.yml)
+done
+
+pass=0
+fail=0
+
+ok() {
+  echo "  ✓ $1"
+  pass=$((pass + 1))
+}
+bad() {
+  echo "  ✗ $1"
+  fail=$((fail + 1))
+}
+
+# ─── Filesystem checks ──────────────────────────────────────────────────────
+
+echo "== Filesystem =="
+
+for f in pr-deploy.yml pr-cleanup.yml test.yml main-deploy.yml; do
+  [ -f ".github/workflows/$f" ] && ok "workflow $f" || bad "missing .github/workflows/$f"
+done
+
+if [ "$STALE_WARN" = "true" ]; then
+  [ -f .github/workflows/pr-stale-warn.yml ] && ok "workflow pr-stale-warn.yml" || bad "enable_stale_pr_warning=true but pr-stale-warn.yml missing"
+fi
+
+if [ "$NEEDS_VPC" = "true" ]; then
+  [ -f .github/workflows/shared-deploy.yml ] && ok "workflow shared-deploy.yml" || bad "needs_vpc=true but shared-deploy.yml missing"
+  [ -d terraform/shared ] && ok "terraform/shared/" || bad "terraform/shared/ missing"
+  [ -d terraform/modules/network ] && ok "terraform/modules/network/" || bad "terraform/modules/network/ missing"
+fi
+
+[ -f .github/actions/dialed-setup/action.yml ] && ok "dialed-setup composite action" || bad ".github/actions/dialed-setup/action.yml missing"
+[ -d terraform/bootstrap ] && ok "terraform/bootstrap/" || bad "terraform/bootstrap/ missing"
+[ -d terraform/stack ] && ok "terraform/stack/" || bad "terraform/stack/ missing"
+[ -f Makefile ] && grep -q 'wait-ready:' Makefile && ok "Makefile has wait-ready target" || bad "Makefile missing or lacks wait-ready target"
+
+# ─── AWS checks per account ─────────────────────────────────────────────────
+
+echo ""
+echo "== AWS =="
+
+declare -A checked_accounts
+for env in "${ENVS[@]}"; do
+  aid="${env_to_account[$env]}"
+  if [ -n "${checked_accounts[$aid]:-}" ]; then
+    continue
+  fi
+  checked_accounts[$aid]=1
+
+  echo ""
+  echo "— Account $aid —"
+
+  current=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo "")
+  if [ "$current" != "$aid" ]; then
+    echo "  ⊘ credentials not for $aid (got $current) — skipping AWS checks for this account"
+    continue
+  fi
+
+  state_bucket="dialed-${PROJECT}-${aid}-tfstate"
+  shared_bucket="dialed-${PROJECT}-${aid}-tfstate-shared"
+  lock_table="dialed-${PROJECT}-${aid}-tflocks"
+
+  if aws s3api head-bucket --bucket "$state_bucket" 2>/dev/null; then
+    ok "S3 bucket $state_bucket"
+    versioning=$(aws s3api get-bucket-versioning --bucket "$state_bucket" --query 'Status' --output text 2>/dev/null || echo "")
+    [ "$versioning" = "Enabled" ] && ok "  versioning enabled" || bad "  versioning NOT enabled on $state_bucket"
+  else
+    bad "S3 bucket $state_bucket missing"
+  fi
+
+  if [ "$NEEDS_VPC" = "true" ]; then
+    aws s3api head-bucket --bucket "$shared_bucket" 2>/dev/null \
+      && ok "S3 bucket $shared_bucket" \
+      || bad "needs_vpc=true but $shared_bucket missing"
+  fi
+
+  aws dynamodb describe-table --table-name "$lock_table" --region "$REGION" >/dev/null 2>&1 \
+    && ok "DDB table $lock_table" \
+    || bad "DDB table $lock_table missing"
+
+  aws iam get-open-id-connect-provider \
+    --open-id-connect-provider-arn "arn:aws:iam::${aid}:oidc-provider/token.actions.githubusercontent.com" \
+    >/dev/null 2>&1 \
+    && ok "GitHub OIDC provider" \
+    || bad "GitHub OIDC provider missing in account $aid"
+done
+
+# Per-env role checks
+echo ""
+for env in "${ENVS[@]}"; do
+  aid="${env_to_account[$env]}"
+  current=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo "")
+  if [ "$current" != "$aid" ]; then
+    echo "⊘ role check for env=$env account=$aid skipped (creds not switched)"
+    continue
+  fi
+  role_name="dialed-deploy-${env}"
+  role_arn_expected="arn:aws:iam::${aid}:role/dialed/${role_name}"
+  if aws iam get-role --role-name "$role_name" >/dev/null 2>&1; then
+    ok "IAM role $role_name (env=$env)"
+    trust=$(aws iam get-role --role-name "$role_name" --query 'Role.AssumeRolePolicyDocument' --output json 2>/dev/null | python3 -c 'import sys,json,urllib.parse; d=json.loads(sys.stdin.read()); print(json.dumps(d) if isinstance(d,dict) else urllib.parse.unquote(sys.stdin.read()))' 2>/dev/null || echo "")
+    if echo "$trust" | grep -q "$GITHUB_REPO"; then
+      ok "  trust policy references $GITHUB_REPO"
+    else
+      bad "  trust policy does not reference $GITHUB_REPO"
+    fi
+  else
+    bad "IAM role $role_name missing in account $aid"
+  fi
+done
+
+# ─── Summary ────────────────────────────────────────────────────────────────
+
+echo ""
+echo "== Summary =="
+echo "  $pass passed, $fail failed"
+if [ "$fail" -gt 0 ]; then
+  echo ""
+  echo "Remediation: re-run dialed:setup (idempotent) or fix individual items manually."
+  exit 1
+fi
+exit 0

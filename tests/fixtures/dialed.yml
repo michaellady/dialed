@@ -1,0 +1,23 @@
+project_name: demo
+aws_region: us-east-1
+github_repo: acme/demo
+env_model: 2-env
+account_model: 2
+account_ids:
+  dev: "111122223333"
+  staging: ""
+  prod: "444455556666"
+domain: ""
+enable_stale_pr_warning: true
+stale_pr_idle_days: 7
+needs_vpc: true
+vpc_cidr: "10.42.0.0/16"
+commands:
+  build: "make build"
+  test_unit: "go test ./..."
+  test_integration: "go test -tags=integration ./..."
+  test_system: "go test -tags=system ./..."
+  test_smoke: "curl -f $STACK_URL/health"
+dialed:
+  version: "0.1.0"
+  setup_completed_at: "2026-04-12T00:00:00Z"
