@@ -65,3 +65,7 @@ Close the PR; pr-cleanup tears everything down.
 - Shared dev VPC + fck-nat: ~$3-5/mo.
 - Each open PR: Lambda + API GW default URL — effectively free unless you're hammering it. Stays up until the PR closes.
 - Prod: same as dev, so doubled.
+
+## Extending with a database
+
+See [database.md](./database.md) for a walkthrough of adding per-PR Postgres via `dialed:add-module database`. Extends the Lambda to read/write to a `pr_<N>` logical database that's created on PR open and dropped on PR close.

@@ -6,7 +6,7 @@ Two flavors, exercising both setup paths:
 
 | Project | `needs_vpc` | Stack shape | Exercises |
 |---|---|---|---|
-| [`hello-world/`](./hello-world/) | `y` | Lambda in VPC + API Gateway | Foundational shared tier, fck-nat, PR stacks inside long-lived VPC, system test hitting API GW URL. This is the primary v1 reference. |
+| [`hello-world/`](./hello-world/) | `y` | Lambda in VPC + API Gateway | Foundational shared tier, fck-nat, PR stacks inside long-lived VPC, system test hitting API GW URL. The [database.md](./hello-world/database.md) sub-walkthrough extends it with per-PR Postgres via `dialed:add-module database` (v2). |
 | [`hello-stateless/`](./hello-stateless/) | `n` | Public Lambda + Function URL | No shared tier, no VPC cost, simplest possible DIALED project. Proves the `needs_vpc=false` path. |
 
 Each subdirectory contains:
