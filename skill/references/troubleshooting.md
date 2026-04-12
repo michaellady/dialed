@@ -83,3 +83,38 @@ DIALED's templates require Terraform 1.6+. Upgrade via `brew upgrade terraform` 
 ### The cleanup Lambda's deployment package is outdated
 
 `terraform/shared/` uses `archive_file` to zip `lambda/cleanup.py` at apply time. If the `.py` source changes and you don't see the Lambda picking it up: re-run `terraform apply` in `terraform/shared/`. The `source_code_hash` changes → Lambda updates.
+
+## Database module (v2)
+
+### `per_pr_database` times out connecting to Postgres
+
+The `cyrilgdn/postgresql` provider tries to TCP-connect to the RDS endpoint on port 5432 during `terraform plan` and `apply`. GitHub-hosted runners are NOT in your VPC by default, so they can't reach a private RDS endpoint.
+
+See `reference-implementation/hello-world/database.md` for the three solution strategies. Quick diagnosis: run `nslookup <rds-endpoint>` from a runner — if it resolves to a private IP (10.x.x.x), the runner can't reach it directly.
+
+### `pr_<N>` database exists but the Lambda sees "no DATABASE_URL"
+
+The Lambda module's `environment.variables.DATABASE_URL` is typically set to `module.per_pr_db[0].connection_string`. Check:
+
+1. Is `per_pr_db` being created? `terraform state list | grep per_pr_db` — if the count expression evaluates to 0, `pr_number` is empty (means this isn't a PR stack).
+2. Is DATABASE_URL actually passed to the Lambda? `aws lambda get-function-configuration --function-name <fn> --query 'Environment.Variables' --output json` — confirm `DATABASE_URL` is present and non-empty.
+
+### RDS destroy blocked by `deletion_protection = true`
+
+Happens in prod. Flip `deletion_protection = false` in `terraform/modules/database/main.tf` (or pass `environment != "prod"` temporarily), `terraform apply` to update the instance, THEN destroy. Don't leave deletion protection off permanently.
+
+### Per-PR DB cleanup fails on destroy — `database "pr_42" does not exist`
+
+Means the DB was already dropped by the cleanup Lambda or a previous failed destroy. Run `terraform state rm module.per_pr_db[0].postgresql_database.pr_db` to evict the stale state entry, then re-run `terraform destroy`.
+
+### `cannot drop role pr_42_user` — other objects depend on it
+
+The role owns objects in the database. If the database was dropped but the role wasn't, objects can linger. Connect to the admin DB with the master secret and run:
+
+```sql
+REASSIGN OWNED BY pr_42_user TO dialed_admin;
+DROP OWNED BY pr_42_user;
+DROP ROLE pr_42_user;
+```
+
+Then `terraform state rm module.per_pr_db[0].postgresql_role.pr_user` and re-apply.

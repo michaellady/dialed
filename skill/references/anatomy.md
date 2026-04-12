@@ -53,6 +53,22 @@ VPC + public/private subnets + IGW + route tables + NAT egress.
 - `nat_mode = "fck-nat"` (default): t4g.nano EC2 in ASG-of-1 via `RaJiska/fck-nat/aws`. ~$3-5/mo.
 - `nat_mode = "managed"`: AWS NAT Gateway + EIP. ~$32/mo per AZ + data. HA.
 
+## `terraform/modules/database/` (v2, optional)
+
+Present after `dialed:add-module database`. RDS Postgres instance — default db.t4g.micro, 20GB gp3, single-AZ, 7-day backups. Master credentials auto-generated and stored in Secrets Manager. `multi_az`, `instance_class`, `backup_retention_days` knobs in the module block under `terraform/shared/main.tf` — bump for prod.
+
+Per-env behavior: prod gets `deletion_protection=true` and a final snapshot on destroy; dev/staging skip the final snapshot so teardown is fast.
+
+Outputs exposed through `terraform/shared/outputs.tf`: `database_endpoint`, `database_port`, `database_name`, `database_master_secret_arn`, `database_security_group_id`. PR stacks and app stacks consume these via `data.terraform_remote_state.shared`.
+
+## `terraform/modules/per_pr_database/` (v2, optional, stack-side)
+
+Installed alongside `modules/database/`. This one lives at the **stack layer** — it's invoked by `terraform/stack/main.tf` from a conditional block that activates only on PR stacks (`count = var.pr_number != "" ? 1 : 0`). Creates a Postgres logical database `pr_<N>` and a scoped role inside the shared RDS cluster, drops both on destroy.
+
+Uses `cyrilgdn/postgresql` provider → requires network reachability from the GitHub runner to the RDS endpoint. Three strategies (SSM tunnel, temporary public subnet, self-hosted runner) documented in `reference-implementation/hello-world/database.md`.
+
+Outputs: `database_name`, `username`, `password` (sensitive), `connection_string` (sensitive). Typical consumer: Lambda `environment.variables.DATABASE_URL`.
+
 ## `terraform/stack/`
 
 Your app's per-env Terraform. Runs once per env (`dev`, `staging`, `prod`) and once per open PR (`dev-pr-N`). State shared across workspaces in one bucket.
