@@ -38,6 +38,7 @@ Per-repo:
 - `.github/actions/dialed-setup/action.yml` exists.
 - `terraform/bootstrap/`, `terraform/stack/` exist.
 - `Makefile` defines `wait-ready` target.
+- (If the database module is installed) `terraform/modules/database/` + `terraform/modules/per_pr_database/` exist, `terraform/stack/main.tf` has the per_pr_db module block, `terraform/shared/outputs.tf` re-exports `database_*` outputs, and per-env the RDS instance + master credentials secret exist in AWS.
 
 ## Reporting
 

@@ -75,6 +75,22 @@ fi
 [ -d terraform/stack ] && ok "terraform/stack/" || bad "terraform/stack/ missing"
 [ -f Makefile ] && grep -q 'wait-ready:' Makefile && ok "Makefile has wait-ready target" || bad "Makefile missing or lacks wait-ready target"
 
+# Database module (optional — present only when add-module database ran)
+has_db_module=false
+if [ -d terraform/modules/database ] || grep -Fq "dialed:add-module:database" terraform/shared/main.tf 2>/dev/null; then
+  has_db_module=true
+  echo ""
+  echo "-- database module detected --"
+  [ -d terraform/modules/database ] && ok "modules/database/ present" || bad "modules/database/ missing but referenced in shared/main.tf"
+  [ -d terraform/modules/per_pr_database ] && ok "modules/per_pr_database/ present" || bad "modules/per_pr_database/ missing (required when database is installed)"
+  grep -Fq 'dialed:add-module:per_pr_db' terraform/stack/main.tf 2>/dev/null \
+    && ok "stack/main.tf has per_pr_db module block" \
+    || bad "stack/main.tf missing the per_pr_db module block"
+  grep -Fq 'database_endpoint' terraform/shared/outputs.tf 2>/dev/null \
+    && ok "shared/outputs.tf re-exports database_*" \
+    || bad "shared/outputs.tf doesn't re-export database_* (consuming stacks can't reach the RDS endpoint)"
+fi
+
 # ─── AWS checks per account ─────────────────────────────────────────────────
 
 echo ""
@@ -126,15 +142,32 @@ for env in "${ENVS[@]}"; do
     || bad "GitHub OIDC provider missing in account $aid"
 done
 
-# Per-env role checks
+# Per-env role + (optional) RDS checks
 echo ""
 for env in "${ENVS[@]}"; do
   aid="${env_to_account[$env]}"
   current=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo "")
   if [ "$current" != "$aid" ]; then
-    echo "⊘ role check for env=$env account=$aid skipped (creds not switched)"
+    echo "⊘ role/DB checks for env=$env account=$aid skipped (creds not switched)"
     continue
   fi
+
+  # Database reachability (only when module is installed)
+  if [ "$has_db_module" = "true" ]; then
+    project=$(yq -r '.project_name' .dialed.yml)
+    db_identifier="${project}-${env}-rds"
+    if aws rds describe-db-instances --db-instance-identifier "$db_identifier" --region "$REGION" >/dev/null 2>&1; then
+      ok "RDS instance $db_identifier (env=$env)"
+      # Verify Secrets Manager secret exists
+      secret_count=$(aws secretsmanager list-secrets --region "$REGION" \
+        --filters "Key=name,Values=${project}-${env}-db-master-" \
+        --query 'length(SecretList)' --output text 2>/dev/null || echo 0)
+      [ "$secret_count" -gt 0 ] && ok "  master-credentials secret present" || bad "  master-credentials secret missing"
+    else
+      bad "RDS instance $db_identifier missing in env=$env — did shared-deploy.yml run?"
+    fi
+  fi
+
   role_name="dialed-deploy-${env}"
   role_arn_expected="arn:aws:iam::${aid}:role/dialed/${role_name}"
   if aws iam get-role --role-name "$role_name" >/dev/null 2>&1; then
