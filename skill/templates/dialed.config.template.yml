@@ -1,0 +1,96 @@
+# .dialed.yml — single source of truth for a DIALED-ified project.
+#
+# This file is written by `dialed:setup` from prompts. Every GitHub Actions
+# workflow sources it via the `dialed-setup` composite action (which exports
+# its fields as env vars); Terraform reads a JSON-converted copy as an
+# auto-loaded .tfvars.json file.
+#
+# Edit this file to change account IDs, region, domain, or test commands.
+# Re-run `dialed:verify` after edits to confirm the state still matches.
+#
+# Role ARNs are intentionally NOT stored here — they're derived at runtime
+# as `arn:aws:iam::{account_id}:role/dialed-deploy-{env}`.
+
+# ─── Project identity ───────────────────────────────────────────────────────
+
+project_name: "{{PROJECT_NAME}}"      # lowercase, hyphens-only, <32 chars. Used as resource name prefix.
+aws_region: "{{AWS_REGION}}"          # e.g. "us-east-1". Single-region only in v1.
+github_repo: "{{GITHUB_REPO}}"        # "owner/name". Used to scope the OIDC trust policy — only
+                                      # workflows in THIS repo can assume the deploy roles.
+
+# ─── Environment model ──────────────────────────────────────────────────────
+#
+# env_model=2-env → dev + prod.
+# env_model=3-env → dev + staging + prod.
+#
+# account_model determines how envs map to AWS accounts:
+#   1 → all envs in one account (isolation via tags + scoped IAM roles)
+#   2 → dev (+ staging) shared, prod separate
+#   3 → one account per env (requires env_model=3-env)
+#
+# Constraint: account_model ≤ number of envs.
+
+env_model: "{{ENV_MODEL}}"            # "2-env" or "3-env"
+account_model: {{ACCOUNT_MODEL}}       # 1, 2, or 3
+
+account_ids:
+  dev: "{{DEV_ACCOUNT_ID}}"           # always present
+  staging: "{{STAGING_ACCOUNT_ID}}"   # present only when env_model=3-env; duplicates dev's ID if they share an account
+  prod: "{{PROD_ACCOUNT_ID}}"         # always present; duplicates dev's ID when account_model=1
+
+# ─── Networking ─────────────────────────────────────────────────────────────
+#
+# needs_vpc=true (default) → foundational shared VPC per env, provisioned at
+# setup. PR stacks live inside this VPC via `data "terraform_remote_state"`.
+# Network module ships with fck-nat (t4g.nano, ~$3–5/mo); switch to a managed
+# NAT Gateway later by setting nat_mode="managed" in terraform/shared/main.tf.
+#
+# needs_vpc=false → no shared tier at setup. Use `dialed:add-shared` later to
+# retrofit a VPC when the project grows into needing one.
+
+needs_vpc: {{NEEDS_VPC}}              # true | false
+vpc_cidr: "{{VPC_CIDR}}"              # default "10.0.0.0/16"; only used when needs_vpc=true
+
+# ─── Domain (optional) ──────────────────────────────────────────────────────
+#
+# When set, PR stacks are exposed at pr-<N>.<domain> via Route 53 + ACM. The
+# stack skeleton's `outputs.stack_url` resolves to this URL. Leave empty to
+# fall back to the raw API Gateway / Lambda Function URL.
+
+domain: "{{DOMAIN}}"                  # e.g. "example.com", or "" for no custom domain
+
+# ─── Stale-PR warning ───────────────────────────────────────────────────────
+#
+# When true, a scheduled workflow comments on PRs that have been open and idle
+# for >N days to remind the author the stack is still costing money. No
+# auto-destroy — humans stay in charge.
+
+enable_stale_pr_warning: {{ENABLE_STALE_PR_WARNING}}  # true | false
+stale_pr_idle_days: {{STALE_PR_IDLE_DAYS}}            # default 7
+
+# ─── Build + test commands ──────────────────────────────────────────────────
+#
+# DIALED is language/framework agnostic. The workflows run these commands as
+# shell strings at each pipeline stage; you author whatever makes sense for
+# your stack.
+#
+# Conventions:
+#   - test-system and test-smoke get $STACK_URL exported (the output from
+#     `terraform output -raw stack_url`). They should exit non-zero on
+#     failure.
+#   - build must produce artifacts in a location `apply` knows about (your
+#     Terraform's `aws_lambda_function.filename` or equivalent).
+#   - All commands run from the repo root.
+
+commands:
+  build: "{{BUILD_CMD}}"                    # e.g. "make build" or "npm run build"
+  test_unit: "{{TEST_UNIT_CMD}}"            # fast, no AWS deps
+  test_integration: "{{TEST_INTEGRATION_CMD}}"  # may call external APIs; still no live AWS stack
+  test_system: "{{TEST_SYSTEM_CMD}}"        # hits $STACK_URL against the deployed PR stack
+  test_smoke: "{{TEST_SMOKE_CMD}}"          # quick health check post-prod-deploy
+
+# ─── DIALED metadata (don't hand-edit) ──────────────────────────────────────
+
+dialed:
+  version: "{{DIALED_VERSION}}"       # which DIALED version rendered this file
+  setup_completed_at: "{{SETUP_TIMESTAMP}}"  # ISO 8601
