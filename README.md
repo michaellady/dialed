@@ -28,4 +28,37 @@ dialed:setup
 
 ## Status
 
-Early development. See `docs/ARCHITECTURE.md` for design rationale and `docs/PREREQUISITES.md` for required tooling.
+Early development. See `docs/ARCHITECTURE.md` for design rationale.
+
+## Dependencies / prerequisites
+
+Before running `dialed:setup` in a consumer project, you need:
+
+**Local tooling** (installable on macOS via `brew install awscli terraform gh actionlint jq yq`):
+
+| Tool | Minimum | Why |
+|---|---|---|
+| AWS CLI | v2 | Bootstraps S3 state buckets + DynamoDB lock tables before Terraform runs. |
+| Terraform | 1.6 | Modern variable validation; used by every deploy step. |
+| `gh` | 2.40 | Powers the stale-PR warning and manual repo operations. |
+| `actionlint` | latest | Lints generated workflow YAML locally. |
+| `yq` | v4 | Reads `.dialed.yml` from scripts and the composite action. |
+| `jq` | 1.6 | Minor helpers in setup/verify scripts. |
+| `bash` | 4+ | All scripts are POSIX bash. |
+
+**AWS access** in each account that will host an env:
+
+- Permissions to create S3 buckets, DynamoDB tables, IAM OIDC providers, IAM roles + policies.
+- Ability to run `aws sts get-caller-identity`.
+
+Once OIDC is bootstrapped, day-to-day deploys use the scoped `dialed-deploy-<env>` role — your local creds are only needed for initial setup and recovery.
+
+**GitHub permissions**:
+
+- Push access to the consumer repository.
+- Workflow permissions allow `id-token: write` (default on most repos; confirm under `Settings → Actions → General → Workflow permissions`).
+- No static GitHub secrets for AWS — OIDC replaces `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`.
+
+**Accounts**: AWS account IDs for every env. 2-env needs `dev_account_id` + `prod_account_id`; 3-env adds `staging_account_id`. Single-account mode (`account_model=1`) reuses one ID for all envs.
+
+Full detail in `docs/PREREQUISITES.md`.
