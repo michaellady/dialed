@@ -1,0 +1,31 @@
+# needs_vpc=false variant. No shared tier created at setup.
+project_name: hello-stateless
+aws_region: us-east-1
+github_repo: OWNER/hello-stateless
+
+env_model: 2-env
+account_model: 2
+
+account_ids:
+  dev: "111122223333"
+  staging: ""
+  prod: "444455556666"
+
+domain: ""
+
+enable_stale_pr_warning: true
+stale_pr_idle_days: 7
+
+needs_vpc: false
+vpc_cidr: ""
+
+commands:
+  build: "GOOS=linux GOARCH=arm64 go build -o bootstrap -tags lambda.norpc . && mkdir -p dist && zip -q dist/bootstrap.zip bootstrap && rm bootstrap"
+  test_unit: "go test -short ./..."
+  test_integration: ""
+  test_system: "curl -sfS $STACK_URL | jq -e '.msg == \"hello from DIALED\"'"
+  test_smoke: "curl -sfS $STACK_URL -o /dev/null -w 'status=%{http_code}\\n' | grep -q 'status=200'"
+
+dialed:
+  version: "0.1.0"
+  setup_completed_at: ""
