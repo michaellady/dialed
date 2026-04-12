@@ -16,7 +16,7 @@ jobs:
         run: |
           mkdir -p ./bin
           curl -sSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash | bash -s -- latest ./bin
-          echo "$PWD/bin" >> $GITHUB_PATH
+          echo "$PWD/bin" >> "$GITHUB_PATH"
       - name: Lint consumer workflow templates
         run: |
           shopt -s nullglob
@@ -113,6 +113,12 @@ jobs:
           # Render each template that contains {{PLACEHOLDER}} tokens and
           # assert none survive the render.
           while IFS= read -r template; do
+            # Skip the config template itself — it has meta-placeholders
+            # (DIALED_VERSION, SETUP_TIMESTAMP) that setup.sh fills at
+            # setup time, not via render.sh.
+            if [ "$template" = "skill/templates/dialed.config.template.yml" ]; then
+              continue
+            fi
             out=$(mktemp)
             skill/scripts/render.sh --in "$template" --out "$out" --config tests/fixtures/dialed.yml
             if grep -q '{{' "$out"; then
