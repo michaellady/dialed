@@ -1,0 +1,123 @@
+name: Shared Infra Deploy
+
+# Deploys the shared-tier Terraform (VPC, NAT, plus any product modules
+# added later via dialed:add-module). Path-filtered so it only runs when
+# shared-tier code changes. Manual trigger supported for controlled
+# re-applies.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "terraform/shared/**"
+      - "terraform/modules/**"
+  workflow_dispatch:
+    inputs:
+      env:
+        description: "Which env's shared tier to deploy"
+        required: true
+        type: choice
+        options: [dev, staging, prod]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy-dev:
+    name: Deploy shared tier (dev)
+    if: github.event_name == 'push' || inputs.env == 'dev'
+    runs-on: ubuntu-latest
+    environment: dev
+    concurrency:
+      group: dialed-shared-dev
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dialed-setup
+        with:
+          env: dev
+      - name: Terraform init (shared)
+        working-directory: terraform/shared
+        run: |
+          terraform init \
+            -backend-config="bucket=dialed-${DIALED_PROJECT_NAME}-${DIALED_ACCOUNT_ID}-tfstate-shared" \
+            -backend-config="key=shared/terraform.tfstate" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="dynamodb_table=dialed-${DIALED_PROJECT_NAME}-${DIALED_ACCOUNT_ID}-tflocks" \
+            -backend-config="encrypt=true"
+      - name: Copy auto-tfvars
+        run: cp .dialed-cache/dialed.auto.tfvars.json terraform/shared/dialed.auto.tfvars.json
+      - name: Terraform apply (shared)
+        working-directory: terraform/shared
+        run: terraform apply -auto-approve -var="environment=dev"
+
+  deploy-staging:
+    name: Deploy shared tier (staging)
+    if: github.event_name == 'push' || inputs.env == 'staging'
+    runs-on: ubuntu-latest
+    environment: staging
+    concurrency:
+      group: dialed-shared-staging
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dialed-setup
+        with:
+          env: staging
+        continue-on-error: true # if env_model=2-env, staging doesn't exist; skip gracefully
+      - name: Skip if no staging env
+        id: gate
+        run: |
+          if [ -z "${DIALED_ACCOUNT_ID:-}" ]; then
+            echo "No staging env configured — skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Terraform init (shared)
+        if: steps.gate.outputs.skip == 'false'
+        working-directory: terraform/shared
+        run: |
+          terraform init \
+            -backend-config="bucket=dialed-${DIALED_PROJECT_NAME}-${DIALED_ACCOUNT_ID}-tfstate-shared" \
+            -backend-config="key=shared/terraform.tfstate" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="dynamodb_table=dialed-${DIALED_PROJECT_NAME}-${DIALED_ACCOUNT_ID}-tflocks" \
+            -backend-config="encrypt=true"
+      - name: Copy auto-tfvars
+        if: steps.gate.outputs.skip == 'false'
+        run: cp .dialed-cache/dialed.auto.tfvars.json terraform/shared/dialed.auto.tfvars.json
+      - name: Terraform apply (shared)
+        if: steps.gate.outputs.skip == 'false'
+        working-directory: terraform/shared
+        run: terraform apply -auto-approve -var="environment=staging"
+
+  deploy-prod:
+    name: Deploy shared tier (prod)
+    if: github.event_name == 'push' || inputs.env == 'prod'
+    needs: [deploy-dev]
+    runs-on: ubuntu-latest
+    environment: prod
+    concurrency:
+      group: dialed-shared-prod
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dialed-setup
+        with:
+          env: prod
+      - name: Terraform init (shared)
+        working-directory: terraform/shared
+        run: |
+          terraform init \
+            -backend-config="bucket=dialed-${DIALED_PROJECT_NAME}-${DIALED_ACCOUNT_ID}-tfstate-shared" \
+            -backend-config="key=shared/terraform.tfstate" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="dynamodb_table=dialed-${DIALED_PROJECT_NAME}-${DIALED_ACCOUNT_ID}-tflocks" \
+            -backend-config="encrypt=true"
+      - name: Copy auto-tfvars
+        run: cp .dialed-cache/dialed.auto.tfvars.json terraform/shared/dialed.auto.tfvars.json
+      - name: Terraform apply (shared)
+        working-directory: terraform/shared
+        run: terraform apply -auto-approve -var="environment=prod"

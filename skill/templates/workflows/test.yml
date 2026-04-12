@@ -1,0 +1,43 @@
+name: Tests
+
+# Runs unit tests on every push and every PR. Separate from pr-deploy so a
+# PR gets fast test feedback even before (or in parallel with) stack
+# deployment. No AWS access needed.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Load test command from .dialed.yml
+        id: cfg
+        run: |
+          if command -v yq >/dev/null 2>&1; then
+            :
+          else
+            curl -sSL -o /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
+            chmod +x /usr/local/bin/yq
+          fi
+          cmd=$(yq -r '.commands.test_unit // ""' .dialed.yml)
+          echo "cmd=${cmd}" >> "$GITHUB_OUTPUT"
+      - name: Run unit tests
+        if: steps.cfg.outputs.cmd != ''
+        env:
+          CMD: ${{ steps.cfg.outputs.cmd }}
+        run: eval "$CMD"
+      - name: Skip notice
+        if: steps.cfg.outputs.cmd == ''
+        run: echo "::notice::commands.test_unit is empty in .dialed.yml — skipping."

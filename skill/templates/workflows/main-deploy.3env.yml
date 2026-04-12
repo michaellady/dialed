@@ -1,0 +1,213 @@
+name: Main Deploy (3-env)
+
+# Push to main → dev → system tests → staging → system+smoke → prod → smoke.
+# Fully automated. Staging is the pre-prod gate; if it's red, prod doesn't
+# deploy. 3-env variant; 2-env variant omits the staging tier.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  unit-and-integration:
+    name: Unit + integration tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dialed-setup
+        with:
+          env: dev
+      - name: Build
+        if: env.DIALED_BUILD_CMD != ''
+        run: eval "$DIALED_BUILD_CMD"
+      - name: Unit tests
+        if: env.DIALED_TEST_UNIT_CMD != ''
+        run: eval "$DIALED_TEST_UNIT_CMD"
+      - name: Integration tests
+        if: env.DIALED_TEST_INTEGRATION_CMD != ''
+        run: eval "$DIALED_TEST_INTEGRATION_CMD"
+
+  deploy-dev:
+    name: Deploy to dev
+    needs: unit-and-integration
+    runs-on: ubuntu-latest
+    environment: dev
+    concurrency:
+      group: dialed-dev
+      cancel-in-progress: false
+    outputs:
+      stack_url: ${{ steps.stack.outputs.url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dialed-setup
+        with:
+          env: dev
+      - if: env.DIALED_BUILD_CMD != ''
+        run: eval "$DIALED_BUILD_CMD"
+      - name: Terraform init + apply (stack)
+        working-directory: terraform/stack
+        run: |
+          terraform init \
+            -backend-config="bucket=dialed-${DIALED_PROJECT_NAME}-${DIALED_ACCOUNT_ID}-tfstate" \
+            -backend-config="key=stack/terraform.tfstate" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="dynamodb_table=dialed-${DIALED_PROJECT_NAME}-${DIALED_ACCOUNT_ID}-tflocks" \
+            -backend-config="encrypt=true"
+          terraform workspace select -or-create "${DIALED_WORKSPACE}"
+          cp ../../.dialed-cache/dialed.auto.tfvars.json dialed.auto.tfvars.json
+          terraform apply -auto-approve -var="environment=dev" -var='pr_number='
+      - name: Capture stack URL
+        id: stack
+        working-directory: terraform/stack
+        run: |
+          url=$(terraform output -raw stack_url 2>/dev/null || echo "")
+          echo "url=${url}" >> "$GITHUB_OUTPUT"
+      - name: Wait for readiness
+        env:
+          STACK_URL: ${{ steps.stack.outputs.url }}
+        run: |
+          if [ -n "${STACK_URL}" ]; then
+            make wait-ready STACK_URL="${STACK_URL}"
+          fi
+
+  system-test-dev:
+    name: System tests (dev)
+    needs: deploy-dev
+    runs-on: ubuntu-latest
+    if: needs.deploy-dev.outputs.stack_url != ''
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dialed-setup
+        with:
+          env: dev
+      - if: env.DIALED_TEST_SYSTEM_CMD != ''
+        env:
+          STACK_URL: ${{ needs.deploy-dev.outputs.stack_url }}
+        run: eval "$DIALED_TEST_SYSTEM_CMD"
+
+  deploy-staging:
+    name: Deploy to staging
+    needs: system-test-dev
+    runs-on: ubuntu-latest
+    environment: staging
+    concurrency:
+      group: dialed-staging
+      cancel-in-progress: false
+    outputs:
+      stack_url: ${{ steps.stack.outputs.url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dialed-setup
+        with:
+          env: staging
+      - if: env.DIALED_BUILD_CMD != ''
+        run: eval "$DIALED_BUILD_CMD"
+      - name: Terraform init + apply (stack)
+        working-directory: terraform/stack
+        run: |
+          terraform init \
+            -backend-config="bucket=dialed-${DIALED_PROJECT_NAME}-${DIALED_ACCOUNT_ID}-tfstate" \
+            -backend-config="key=stack/terraform.tfstate" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="dynamodb_table=dialed-${DIALED_PROJECT_NAME}-${DIALED_ACCOUNT_ID}-tflocks" \
+            -backend-config="encrypt=true"
+          terraform workspace select -or-create "${DIALED_WORKSPACE}"
+          cp ../../.dialed-cache/dialed.auto.tfvars.json dialed.auto.tfvars.json
+          terraform apply -auto-approve -var="environment=staging" -var='pr_number='
+      - name: Capture stack URL
+        id: stack
+        working-directory: terraform/stack
+        run: |
+          url=$(terraform output -raw stack_url 2>/dev/null || echo "")
+          echo "url=${url}" >> "$GITHUB_OUTPUT"
+      - name: Wait for readiness
+        env:
+          STACK_URL: ${{ steps.stack.outputs.url }}
+        run: |
+          if [ -n "${STACK_URL}" ]; then
+            make wait-ready STACK_URL="${STACK_URL}"
+          fi
+
+  system-and-smoke-staging:
+    name: System + smoke tests (staging)
+    needs: deploy-staging
+    runs-on: ubuntu-latest
+    if: needs.deploy-staging.outputs.stack_url != ''
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dialed-setup
+        with:
+          env: staging
+      - name: System tests
+        if: env.DIALED_TEST_SYSTEM_CMD != ''
+        env:
+          STACK_URL: ${{ needs.deploy-staging.outputs.stack_url }}
+        run: eval "$DIALED_TEST_SYSTEM_CMD"
+      - name: Smoke tests
+        if: env.DIALED_TEST_SMOKE_CMD != ''
+        env:
+          STACK_URL: ${{ needs.deploy-staging.outputs.stack_url }}
+        run: eval "$DIALED_TEST_SMOKE_CMD"
+
+  deploy-prod:
+    name: Deploy to prod
+    needs: system-and-smoke-staging
+    runs-on: ubuntu-latest
+    environment: prod
+    concurrency:
+      group: dialed-prod
+      cancel-in-progress: false
+    outputs:
+      stack_url: ${{ steps.stack.outputs.url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dialed-setup
+        with:
+          env: prod
+      - if: env.DIALED_BUILD_CMD != ''
+        run: eval "$DIALED_BUILD_CMD"
+      - name: Terraform init + apply (stack)
+        working-directory: terraform/stack
+        run: |
+          terraform init \
+            -backend-config="bucket=dialed-${DIALED_PROJECT_NAME}-${DIALED_ACCOUNT_ID}-tfstate" \
+            -backend-config="key=stack/terraform.tfstate" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="dynamodb_table=dialed-${DIALED_PROJECT_NAME}-${DIALED_ACCOUNT_ID}-tflocks" \
+            -backend-config="encrypt=true"
+          terraform workspace select -or-create "${DIALED_WORKSPACE}"
+          cp ../../.dialed-cache/dialed.auto.tfvars.json dialed.auto.tfvars.json
+          terraform apply -auto-approve -var="environment=prod" -var='pr_number='
+      - name: Capture stack URL
+        id: stack
+        working-directory: terraform/stack
+        run: |
+          url=$(terraform output -raw stack_url 2>/dev/null || echo "")
+          echo "url=${url}" >> "$GITHUB_OUTPUT"
+      - name: Wait for readiness
+        env:
+          STACK_URL: ${{ steps.stack.outputs.url }}
+        run: |
+          if [ -n "${STACK_URL}" ]; then
+            make wait-ready STACK_URL="${STACK_URL}"
+          fi
+
+  smoke-test-prod:
+    name: Smoke tests (prod)
+    needs: deploy-prod
+    runs-on: ubuntu-latest
+    if: needs.deploy-prod.outputs.stack_url != ''
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dialed-setup
+        with:
+          env: prod
+      - if: env.DIALED_TEST_SMOKE_CMD != ''
+        env:
+          STACK_URL: ${{ needs.deploy-prod.outputs.stack_url }}
+        run: eval "$DIALED_TEST_SMOKE_CMD"

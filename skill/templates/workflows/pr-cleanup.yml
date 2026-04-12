@@ -1,0 +1,130 @@
+name: PR Cleanup
+
+# Triggers on PR close (merged or abandoned). Destroys the PR's Terraform
+# workspace in the dev account. Retries up to 3x with exponential backoff
+# to handle AWS eventual-consistency. On final failure, invokes the orphan
+# cleanup Lambda (deployed by the shared tier) if present.
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number whose stack should be destroyed"
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: dialed-dev-pr-${{ github.event.pull_request.number || inputs.pr_number }}
+  cancel-in-progress: false
+
+env:
+  PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
+
+jobs:
+  destroy:
+    name: Destroy PR stack
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dialed-setup
+        with:
+          env: dev
+
+      - name: Terraform init (stack)
+        working-directory: terraform/stack
+        run: |
+          terraform init \
+            -backend-config="bucket=dialed-${DIALED_PROJECT_NAME}-${DIALED_ACCOUNT_ID}-tfstate" \
+            -backend-config="key=stack/terraform.tfstate" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="dynamodb_table=dialed-${DIALED_PROJECT_NAME}-${DIALED_ACCOUNT_ID}-tflocks" \
+            -backend-config="encrypt=true"
+
+      - name: Check workspace exists
+        id: ws_check
+        working-directory: terraform/stack
+        run: |
+          if terraform workspace list | grep -Fxq "  ${DIALED_WORKSPACE}" || terraform workspace list | grep -Fxq "* ${DIALED_WORKSPACE}"; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Workspace ${DIALED_WORKSPACE} does not exist — nothing to destroy."
+          fi
+
+      - name: Select workspace
+        if: steps.ws_check.outputs.exists == 'true'
+        working-directory: terraform/stack
+        run: terraform workspace select "${DIALED_WORKSPACE}"
+
+      - name: Copy auto-tfvars into stack dir
+        if: steps.ws_check.outputs.exists == 'true'
+        run: cp .dialed-cache/dialed.auto.tfvars.json terraform/stack/dialed.auto.tfvars.json
+
+      - name: Terraform destroy (with retries)
+        if: steps.ws_check.outputs.exists == 'true'
+        id: destroy
+        working-directory: terraform/stack
+        run: |
+          set +e
+          attempts=0
+          max_attempts=3
+          delay=30
+          while [ $attempts -lt $max_attempts ]; do
+            attempts=$((attempts + 1))
+            echo "::group::destroy attempt ${attempts}/${max_attempts}"
+            terraform destroy -auto-approve \
+              -var="environment=${DIALED_ENV}" \
+              -var="pr_number=${PR_NUMBER}"
+            status=$?
+            echo "::endgroup::"
+            if [ $status -eq 0 ]; then
+              echo "destroyed=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [ $attempts -lt $max_attempts ]; then
+              echo "destroy failed; sleeping ${delay}s before retry"
+              sleep $delay
+              delay=$((delay * 2))
+            fi
+          done
+          echo "destroyed=false" >> "$GITHUB_OUTPUT"
+          exit 0  # fall through to orphan-cleanup step
+
+      - name: Invoke orphan cleanup Lambda (if shared tier is deployed)
+        if: steps.ws_check.outputs.exists == 'true' && steps.destroy.outputs.destroyed == 'false'
+        run: |
+          cleanup_fn="dialed-${DIALED_PROJECT_NAME}-cleanup-${DIALED_ENV}"
+          if aws lambda get-function --function-name "$cleanup_fn" >/dev/null 2>&1; then
+            echo "Invoking $cleanup_fn with workspace=${DIALED_WORKSPACE} pr_number=${PR_NUMBER}"
+            payload=$(printf '{"workspace":"%s","pr_number":"%s","environment":"%s"}' "${DIALED_WORKSPACE}" "${PR_NUMBER}" "${DIALED_ENV}")
+            aws lambda invoke \
+              --function-name "$cleanup_fn" \
+              --cli-binary-format raw-in-base64-out \
+              --payload "$payload" \
+              /tmp/cleanup-result.json
+            echo "Cleanup Lambda result:"
+            cat /tmp/cleanup-result.json
+          else
+            echo "::warning::No cleanup Lambda found at $cleanup_fn. Workspace left in failed-destroy state for manual intervention."
+          fi
+
+      - name: Fail if destroy never succeeded
+        if: steps.ws_check.outputs.exists == 'true' && steps.destroy.outputs.destroyed == 'false'
+        run: |
+          echo "::error::terraform destroy failed after 3 retries. Workspace ${DIALED_WORKSPACE} retained for manual inspection."
+          exit 1
+
+      - name: Delete empty workspace
+        if: steps.ws_check.outputs.exists == 'true' && steps.destroy.outputs.destroyed == 'true'
+        working-directory: terraform/stack
+        run: |
+          terraform workspace select default
+          terraform workspace delete "${DIALED_WORKSPACE}"

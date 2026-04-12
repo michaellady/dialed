@@ -1,0 +1,146 @@
+name: PR Deploy
+
+# Triggers on PRs targeting main only. Every PR gets its own Terraform
+# workspace (dev-pr-<N>) and ephemeral AWS resources in the dev account.
+# On PR close, pr-cleanup.yml tears it all down.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to deploy/refresh"
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: dialed-dev-pr-${{ github.event.pull_request.number || inputs.pr_number }}
+  cancel-in-progress: false
+
+env:
+  PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
+
+jobs:
+  unit-and-integration:
+    name: Unit + integration tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: DIALED setup (dev context, no AWS calls in this job)
+        uses: ./.github/actions/dialed-setup
+        with:
+          env: dev
+      - name: Build
+        if: env.DIALED_BUILD_CMD != ''
+        run: eval "$DIALED_BUILD_CMD"
+      - name: Unit tests
+        if: env.DIALED_TEST_UNIT_CMD != ''
+        run: eval "$DIALED_TEST_UNIT_CMD"
+      - name: Integration tests
+        if: env.DIALED_TEST_INTEGRATION_CMD != ''
+        run: eval "$DIALED_TEST_INTEGRATION_CMD"
+
+  deploy:
+    name: Deploy PR stack to dev
+    runs-on: ubuntu-latest
+    needs: unit-and-integration
+    environment: dev
+    outputs:
+      stack_url: ${{ steps.stack.outputs.url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: DIALED setup
+        uses: ./.github/actions/dialed-setup
+        with:
+          env: dev
+
+      - name: Build deployment artifact
+        if: env.DIALED_BUILD_CMD != ''
+        run: eval "$DIALED_BUILD_CMD"
+
+      - name: Terraform init (stack)
+        working-directory: terraform/stack
+        run: |
+          terraform init \
+            -backend-config="bucket=dialed-${DIALED_PROJECT_NAME}-${DIALED_ACCOUNT_ID}-tfstate" \
+            -backend-config="key=stack/terraform.tfstate" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="dynamodb_table=dialed-${DIALED_PROJECT_NAME}-${DIALED_ACCOUNT_ID}-tflocks" \
+            -backend-config="encrypt=true"
+
+      - name: Select or create TF workspace
+        working-directory: terraform/stack
+        run: |
+          terraform workspace select -or-create "${DIALED_WORKSPACE}"
+
+      - name: Copy auto-tfvars into stack dir
+        run: cp .dialed-cache/dialed.auto.tfvars.json terraform/stack/dialed.auto.tfvars.json
+
+      - name: Terraform apply
+        working-directory: terraform/stack
+        run: |
+          terraform apply -auto-approve \
+            -var="environment=${DIALED_ENV}" \
+            -var="pr_number=${PR_NUMBER}"
+
+      - name: Capture stack URL
+        id: stack
+        working-directory: terraform/stack
+        run: |
+          url=$(terraform output -raw stack_url 2>/dev/null || echo "")
+          echo "url=${url}" >> "$GITHUB_OUTPUT"
+          echo "Stack URL: ${url}"
+
+      - name: Wait for readiness
+        env:
+          STACK_URL: ${{ steps.stack.outputs.url }}
+        run: |
+          if [ -z "${STACK_URL}" ]; then
+            echo "::warning::No stack_url output; skipping wait-ready. Define outputs.stack_url in terraform/stack/outputs.tf or override make wait-ready."
+            exit 0
+          fi
+          make wait-ready STACK_URL="${STACK_URL}"
+
+      - name: Comment on PR with deployment info
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const url = '${{ steps.stack.outputs.url }}' || '(no stack_url output)';
+            const body = `### Deployed to dev PR stack\n\n**URL:** ${url}\n**Workspace:** \`${process.env.DIALED_WORKSPACE}\`\n\nThis stack will be destroyed automatically when the PR is closed.`;
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number,
+            });
+            const prior = comments.find(c => c.user.type === 'Bot' && c.body.includes('Deployed to dev PR stack'));
+            if (prior) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner, repo: context.repo.repo, comment_id: prior.id, body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number, body,
+              });
+            }
+
+  system-test:
+    name: System tests against PR stack
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: needs.deploy.outputs.stack_url != ''
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dialed-setup
+        with:
+          env: dev
+      - name: Run system tests
+        if: env.DIALED_TEST_SYSTEM_CMD != ''
+        env:
+          STACK_URL: ${{ needs.deploy.outputs.stack_url }}
+        run: eval "$DIALED_TEST_SYSTEM_CMD"

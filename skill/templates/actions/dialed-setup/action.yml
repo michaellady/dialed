@@ -68,6 +68,13 @@ runs:
         account_id=$(yq -r ".account_ids.${ENV}" .dialed.yml)
         domain=$(yq -r '.domain // ""' .dialed.yml)
 
+        # Build/test command hooks — workflows invoke these via `eval "$DIALED_…"`
+        build_cmd=$(yq -r '.commands.build // ""' .dialed.yml)
+        test_unit_cmd=$(yq -r '.commands.test_unit // ""' .dialed.yml)
+        test_integration_cmd=$(yq -r '.commands.test_integration // ""' .dialed.yml)
+        test_system_cmd=$(yq -r '.commands.test_system // ""' .dialed.yml)
+        test_smoke_cmd=$(yq -r '.commands.test_smoke // ""' .dialed.yml)
+
         if [ -z "$account_id" ] || [ "$account_id" = "null" ]; then
           echo "::error::account_ids.${ENV} is missing from .dialed.yml"
           exit 1
@@ -98,6 +105,11 @@ runs:
           echo "DIALED_ENV=${ENV}"
           echo "AWS_REGION=${aws_region}"
           echo "TF_WORKSPACE=${workspace}"
+          echo "DIALED_BUILD_CMD=${build_cmd}"
+          echo "DIALED_TEST_UNIT_CMD=${test_unit_cmd}"
+          echo "DIALED_TEST_INTEGRATION_CMD=${test_integration_cmd}"
+          echo "DIALED_TEST_SYSTEM_CMD=${test_system_cmd}"
+          echo "DIALED_TEST_SMOKE_CMD=${test_smoke_cmd}"
         } >> "$GITHUB_ENV"
 
         {
