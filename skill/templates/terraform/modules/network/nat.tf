@@ -7,6 +7,11 @@
 module "fck_nat" {
   count = var.nat_mode == "fck-nat" ? 1 : 0
 
+  # `~> 1.4` auto-accepts patch releases, and a fck-nat 1.4.x patch RAISED its own
+  # required_version to `~> 1.9` — which becomes the effective Terraform floor for the
+  # whole stack at `terraform init`. If you ever see "Unsupported Terraform Core version"
+  # in a shared/stack apply, it is this module: bump dialed-setup's terraform_version
+  # default to satisfy it (see skill/templates/actions/dialed-setup/action.yml).
   source  = "RaJiska/fck-nat/aws"
   version = "~> 1.4"
 

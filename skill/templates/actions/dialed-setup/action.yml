@@ -10,9 +10,15 @@ inputs:
     description: "Which env this job is operating on: dev, staging, or prod."
     required: true
   terraform_version:
-    description: "Terraform version to install. Default matches DIALED's pinned version."
+    description: >
+      Terraform version to install. Must satisfy the strictest required_version of
+      everything the stack sources — including EXTERNAL modules. The network module's
+      RaJiska/fck-nat/aws (~> 1.4) raised its own required_version to `~> 1.9`, so the
+      installed Terraform must be >= 1.9 or `terraform init` fails with "Unsupported
+      Terraform Core version". Keep this default at/above the highest floor any sourced
+      module requires.
     required: false
-    default: "1.6.6"
+    default: "1.9.8"
 
 outputs:
   account_id:
@@ -136,7 +142,7 @@ runs:
         role-session-name: dialed-${{ inputs.env }}-${{ github.run_id }}
 
     - name: Install Terraform
-      uses: hashicorp/setup-terraform@v3
+      uses: hashicorp/setup-terraform@v4
       with:
         terraform_version: ${{ inputs.terraform_version }}
         terraform_wrapper: false

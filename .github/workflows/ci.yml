@@ -36,9 +36,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@v4
         with:
-          terraform_version: 1.6.6
+          # Must be >= 1.9: templates source RaJiska/fck-nat/aws (~> 1.4), whose 1.4.x
+          # raised required_version to ~> 1.9, so `terraform validate` of the network
+          # module fails to init below 1.9. Keep in sync with dialed-setup's default.
+          terraform_version: 1.9.8
       - name: Validate every TF module/config
         run: |
           shopt -s nullglob globstar

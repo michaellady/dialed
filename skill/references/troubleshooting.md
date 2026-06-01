@@ -74,7 +74,7 @@ Informational. `dialed:verify` checks the current AWS account only. Switch creds
 
 ### `terraform: required_version = ">= 1.6"` but local is 1.5.x
 
-DIALED's templates require Terraform 1.6+. Upgrade via `brew upgrade terraform` (via `hashicorp/tap/terraform`) or download from hashicorp.com. Local `make test` skips TF validation gracefully when the version is too old; CI uses 1.6.6.
+DIALED's own templates declare `required_version = ">= 1.6"`, but the **effective floor is 1.9**: the network module sources `RaJiska/fck-nat/aws` (`~> 1.4`), and a fck-nat 1.4.x patch raised *its* `required_version` to `~> 1.9` — Terraform combines all the requirements, so `terraform init` needs **>= 1.9**. If you see `Unsupported Terraform Core version … ~> 1.9` (or the older `>= 1.6` message), upgrade via `brew upgrade terraform` (via `hashicorp/tap/terraform`) or download from hashicorp.com. Local `make test` skips TF validation gracefully when the version is below 1.9; CI installs **1.9.8** (the `dialed-setup` action's `terraform_version` default, which must stay at/above the highest floor any sourced module requires).
 
 ### `yq: command not found` in scripts
 
