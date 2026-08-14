@@ -104,7 +104,10 @@ runs:
           echo "DIALED_DOMAIN=${domain}"
           echo "DIALED_ENV=${ENV}"
           echo "AWS_REGION=${aws_region}"
-          echo "TF_WORKSPACE=${workspace}"
+          # TF_WORKSPACE is intentionally NOT exported: setting it makes
+          # `terraform workspace select -or-create` fail ("The selected workspace
+          # is currently overridden using the TF_WORKSPACE environment variable").
+          # The deploy jobs select the workspace explicitly via DIALED_WORKSPACE.
           echo "DIALED_BUILD_CMD=${build_cmd}"
           echo "DIALED_TEST_UNIT_CMD=${test_unit_cmd}"
           echo "DIALED_TEST_INTEGRATION_CMD=${test_integration_cmd}"
