@@ -39,7 +39,7 @@ Before running `dialed:setup` in a consumer project, you need:
 | Tool | Minimum | Why |
 |---|---|---|
 | AWS CLI | v2 | Bootstraps S3 state buckets + DynamoDB lock tables before Terraform runs. |
-| Terraform | 1.6 | Modern variable validation; used by every deploy step. |
+| Terraform | 1.9 | Modern variable validation; used by every deploy step. |
 | `gh` | 2.40 | Powers the stale-PR warning and manual repo operations. |
 | `actionlint` | latest | Lints generated workflow YAML locally. |
 | `yq` | v4 | Reads `.dialed.yml` from scripts and the composite action. |

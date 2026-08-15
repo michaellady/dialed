@@ -60,8 +60,8 @@ test:
 		tf_ver=$$(terraform version | head -1 | sed -E 's/.*v([0-9.]+).*/\1/'); \
 		tf_major=$$(echo "$$tf_ver" | cut -d. -f1); \
 		tf_minor=$$(echo "$$tf_ver" | cut -d. -f2); \
-		if [ "$$tf_major" -lt 1 ] || { [ "$$tf_major" -eq 1 ] && [ "$$tf_minor" -lt 6 ]; }; then \
-			echo "terraform $$tf_ver is older than required >=1.6; skipping local validate (CI uses 1.6.6)"; \
+		if [ "$$tf_major" -lt 1 ] || { [ "$$tf_major" -eq 1 ] && [ "$$tf_minor" -lt 9 ]; }; then \
+			echo "terraform $$tf_ver is older than required >=1.9; skipping local validate (CI uses 1.9.8)"; \
 		else \
 			set -e; \
 			for d in $$(find skill/templates/terraform -type f -name '*.tf' -exec dirname {} \; | sort -u); do \
