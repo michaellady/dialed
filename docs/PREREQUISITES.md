@@ -7,7 +7,7 @@ DIALED expects these tools and permissions in place before you run `dialed:setup
 | Tool | Minimum version | Why |
 |---|---|---|
 | AWS CLI | v2 | Bootstrap creates S3 state buckets + DynamoDB lock tables via `aws` commands before any Terraform runs. |
-| Terraform | 1.6 | Uses modern variable validation and `import` block syntax. |
+| Terraform | 1.9 | Uses modern variable validation and `import` block syntax. |
 | `gh` | 2.40 | Used by stale-PR warning workflow and for manual repo operations during setup. |
 | `actionlint` | latest | Local lint for generated GitHub Actions workflows. |
 | `jq` | 1.6 | Used by setup/verify scripts to read `.dialed.yml`. |
