@@ -67,6 +67,14 @@ resource "aws_iam_openid_connect_provider" "github" {
 
 locals {
   oidc_provider_arn = var.assume_oidc_provider_exists ? data.aws_iam_openid_connect_provider.github_existing[0].arn : aws_iam_openid_connect_provider.github[0].arn
+
+  # Repo identifiers trusted in the OIDC `sub` claim. Always includes the
+  # classic "owner/name" form; orgs emitting IMMUTABLE subjects (numeric ids,
+  # e.g. "org@123/repo@456") must add that form via var.oidc_extra_sub_repos,
+  # since the classic pattern never matches an immutable sub. Default is just
+  # [github_repo] — a single-element list, behaviorally identical to the prior
+  # scalar condition.
+  oidc_sub_repos = concat([var.github_repo], var.oidc_extra_sub_repos)
 }
 
 # ─── Per-env deploy roles ───────────────────────────────────────────────────
@@ -98,9 +106,9 @@ resource "aws_iam_role" "deploy" {
             "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
           }
           StringLike = each.key == "prod" ? {
-            "token.actions.githubusercontent.com:sub" = "repo:${var.github_repo}:ref:refs/heads/main"
+            "token.actions.githubusercontent.com:sub" = [for r in local.oidc_sub_repos : "repo:${r}:ref:refs/heads/main"]
             } : {
-            "token.actions.githubusercontent.com:sub" = "repo:${var.github_repo}:*"
+            "token.actions.githubusercontent.com:sub" = [for r in local.oidc_sub_repos : "repo:${r}:*"]
           }
         }
       }

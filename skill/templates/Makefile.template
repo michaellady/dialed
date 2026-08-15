@@ -25,25 +25,36 @@ help:
 
 # ─── Commands from .dialed.yml ─────────────────────────────────────────────
 # Rendered once at setup. Re-run dialed:setup to re-render after edits.
+#
+# Each command is rendered as a single-quoted, Make-escaped literal, so a
+# command may safely contain quotes and shell vars — e.g.
+# test_smoke: 'curl -fsS "$STACK_URL/health"'. Runtime vars (STACK_URL etc.)
+# expand at `eval` time.
+#
+# NOTE: do NOT set a .dialed.yml command to `make <name>` where <name> is one
+# of these generated targets (build, test-unit, test-integration, test-system,
+# test-smoke) — the target would invoke itself and recurse forever. Point the
+# command at the real underlying command (e.g. `go test ./...`) or a
+# differently-named target.
 
 build:
-	@cmd="{{BUILD_CMD}}"; \
+	@cmd={{BUILD_CMD_MK}}; \
 	if [ -n "$$cmd" ]; then eval "$$cmd"; else echo "(no build command configured in .dialed.yml)"; fi
 
 test-unit:
-	@cmd="{{TEST_UNIT_CMD}}"; \
+	@cmd={{TEST_UNIT_CMD_MK}}; \
 	if [ -n "$$cmd" ]; then eval "$$cmd"; else echo "(no test_unit command configured)"; fi
 
 test-integration:
-	@cmd="{{TEST_INTEGRATION_CMD}}"; \
+	@cmd={{TEST_INTEGRATION_CMD_MK}}; \
 	if [ -n "$$cmd" ]; then eval "$$cmd"; else echo "(no test_integration command configured)"; fi
 
 test-system:
-	@cmd="{{TEST_SYSTEM_CMD}}"; \
+	@cmd={{TEST_SYSTEM_CMD_MK}}; \
 	if [ -n "$$cmd" ]; then eval "$$cmd"; else echo "(no test_system command configured)"; fi
 
 test-smoke:
-	@cmd="{{TEST_SMOKE_CMD}}"; \
+	@cmd={{TEST_SMOKE_CMD_MK}}; \
 	if [ -n "$$cmd" ]; then eval "$$cmd"; else echo "(no test_smoke command configured)"; fi
 
 # ─── Readiness probe ───────────────────────────────────────────────────────

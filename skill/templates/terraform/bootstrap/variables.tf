@@ -43,3 +43,9 @@ variable "assume_oidc_provider_exists" {
   default     = false
   description = "Set true if the github OIDC provider already exists in this account (e.g. from a prior DIALED bootstrap or another tool). When true, the module reuses the existing provider; when false, it creates one."
 }
+
+variable "oidc_extra_sub_repos" {
+  type        = list(string)
+  default     = []
+  description = "Extra repo identifiers to trust in the GitHub OIDC `sub` claim, in addition to github_repo. Needed when the repo's GitHub org emits IMMUTABLE subject claims (numeric ids embedded), e.g. \"my-org@313487774/my-repo@1324224531\" — read it from `gh api /repos/OWNER/REPO/actions/oidc/customization/sub` (.sub_claim_prefix, minus the leading \"repo:\"). Each entry is trusted as repo:<id>:* (non-prod) and repo:<id>:ref:refs/heads/main (prod), alongside the classic github_repo form. Defaults to [] — zero effect for repos with the standard mutable subject."
+}

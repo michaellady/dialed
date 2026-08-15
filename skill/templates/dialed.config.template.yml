@@ -81,6 +81,12 @@ stale_pr_idle_days: {{STALE_PR_IDLE_DAYS}}            # default 7
 #   - build must produce artifacts in a location `apply` knows about (your
 #     Terraform's `aws_lambda_function.filename` or equivalent).
 #   - All commands run from the repo root.
+#   - Commands may contain quotes and shell vars (e.g. "$STACK_URL"); they are
+#     rendered safely into the Makefile and run via eval.
+#   - Do NOT set a command to `make <target>` where <target> is one of the
+#     generated Makefile targets (build, test-unit, test-integration,
+#     test-system, test-smoke) — it would recurse forever. Point at the real
+#     command (e.g. "go test ./...") or a differently-named target.
 
 commands:
   build: "{{BUILD_CMD}}"                    # e.g. "make build" or "npm run build"
