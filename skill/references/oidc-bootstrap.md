@@ -45,8 +45,15 @@ cat > /tmp/trust.json <<EOF
 }
 EOF
 
-# For prod, replace the StringLike with:
-#   "StringLike": { "token.actions.githubusercontent.com:sub": "repo:${GITHUB_REPO}:ref:refs/heads/main" }
+# For prod, replace the StringLike with BOTH the main ref and the
+# environment:prod subject — a job that declares `environment: prod` emits the
+# latter, not a ref, so a role trusting only the ref form fails to assume:
+#   "StringLike": { "token.actions.githubusercontent.com:sub": [
+#     "repo:${GITHUB_REPO}:ref:refs/heads/main",
+#     "repo:${GITHUB_REPO}:environment:prod"
+#   ] }
+# Trusting environment:prod means the main-only gate is no longer in this trust
+# policy — you MUST lock the prod GitHub environment to main (see below).
 
 aws iam create-role \
   --role-name dialed-deploy-${ENV} \
@@ -68,6 +75,38 @@ rm /tmp/trust.json /tmp/iam-scoped.json
 ```
 
 `iam-scoped.json` content matches the inline policy in `terraform/bootstrap/main.tf` — copy it verbatim with the placeholders filled.
+
+## Lock the prod GitHub environment to main (REQUIRED)
+
+The prod deploy role trusts the `environment:prod` OIDC subject so that the
+`deploy-prod` job — which declares `environment: prod` — can assume it. That
+subject is emitted by the job regardless of which branch it runs on, and
+`main-deploy` is `workflow_dispatch`-able from **any** branch. So the branch
+restriction for prod is **not** in the AWS trust policy; it lives in the prod
+GitHub environment's deployment-branch policy. `dialed:setup` does this
+automatically; to (re)assert it by hand:
+
+```bash
+# Enable custom branch policies on the prod environment (creates it if absent)
+gh api -X PUT "repos/OWNER/REPO/environments/prod" \
+  -F "deployment_branch_policy[protected_branches]=false" \
+  -F "deployment_branch_policy[custom_branch_policies]=true"
+
+# Allow only 'main' to deploy to prod
+gh api -X POST "repos/OWNER/REPO/environments/prod/deployment-branch-policies" \
+  -f name=main
+```
+
+Verify:
+
+```bash
+gh api "repos/OWNER/REPO/environments/prod/deployment-branch-policies" \
+  --jq '.branch_policies[].name'   # must print exactly: main
+```
+
+Without this, a non-main branch can `workflow_dispatch` `main-deploy`, hit the
+`deploy-prod` job, present the trusted `environment:prod` subject, and deploy
+non-main code to prod.
 
 ## Nuke and re-bootstrap
 

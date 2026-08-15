@@ -169,6 +169,36 @@ for aid in "${!account_envs_ordered[@]}"; do
   popd >/dev/null
 done
 
+# ─── Lock the prod GitHub environment to main ───────────────────────────────
+#
+# The prod deploy role trusts the `environment:prod` OIDC subject (jobs that
+# declare `environment: prod` emit that subject, not the branch ref). That
+# moves the "prod deploys only from main" gate OFF the AWS trust policy and
+# ONTO the prod GitHub environment's deployment-branch policy. main-deploy is
+# also workflow_dispatch-able from ANY branch, so without this lock a non-main
+# branch could dispatch a deploy that assumes the prod role. Create + lock the
+# environment now. Idempotent: re-running just re-asserts the policy.
+
+if printf '%s\n' "${ENVS[@]}" | grep -qx prod; then
+  echo ""
+  echo "==> Locking prod GitHub environment (${GITHUB_REPO}) to 'main'"
+
+  gh api -X PUT "repos/${GITHUB_REPO}/environments/prod" \
+    -F "deployment_branch_policy[protected_branches]=false" \
+    -F "deployment_branch_policy[custom_branch_policies]=true" \
+    >/dev/null
+
+  # Add the 'main' policy only if absent — POST is not idempotent (a duplicate
+  # name 422s).
+  if ! gh api "repos/${GITHUB_REPO}/environments/prod/deployment-branch-policies" \
+      --jq '.branch_policies[].name' 2>/dev/null | grep -qx main; then
+    gh api -X POST "repos/${GITHUB_REPO}/environments/prod/deployment-branch-policies" \
+      -f name=main >/dev/null
+  fi
+
+  echo "✓ prod environment locked to main"
+fi
+
 # ─── Deploy shared tier per env ─────────────────────────────────────────────
 
 if [ "$NEEDS_VPC" = "true" ]; then

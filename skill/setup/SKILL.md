@@ -48,6 +48,7 @@ Before running any AWS commands, summarize the plan for the user and wait for ex
 
 - Which accounts get bootstrapped (S3 bucket + DynamoDB table created in each).
 - Which accounts get an OIDC IAM role set (one `dialed-deploy-{env}` per env).
+- That the prod GitHub environment will be created (if absent) and locked to `main` — the branch gate for prod deploys.
 - If needs_vpc=y: which envs get a VPC created (list with estimated cost: ~$3-5/mo per env with fck-nat, ~$32/mo per env if nat_mode=managed later).
 - Total rough monthly cost estimate.
 
@@ -72,7 +73,12 @@ Stream its output. It will:
 5. For each distinct account ID in `.dialed.yml`, prompt the user to switch AWS credentials to that account, then run:
    - `scripts/bootstrap-state.sh` (idempotent S3 + DDB creation)
    - `terraform apply` on `terraform/bootstrap/` (OIDC provider + deploy roles)
-6. If `needs_vpc=y`, for each env, switch credentials to its account and run `terraform apply` on `terraform/shared/` after confirming cost.
+6. Lock the prod GitHub environment to `main` via `gh api` (creates the `prod`
+   environment if absent, enables custom branch policies, allows only `main`).
+   This is the branch gate for prod: the prod deploy role trusts the
+   `environment:prod` OIDC subject, so main-only is enforced here, not in the
+   AWS trust policy. Idempotent.
+7. If `needs_vpc=y`, for each env, switch credentials to its account and run `terraform apply` on `terraform/shared/` after confirming cost.
 
 ## After setup.sh succeeds
 
