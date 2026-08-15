@@ -72,9 +72,9 @@ Informational. `dialed:verify` checks the current AWS account only. Switch creds
 
 ## Local development
 
-### `terraform: required_version = ">= 1.6"` but local is 1.5.x
+### `terraform: required_version = ">= 1.9"` but local is older
 
-DIALED's templates require Terraform 1.6+. Upgrade via `brew upgrade terraform` (via `hashicorp/tap/terraform`) or download from hashicorp.com. Local `make test` skips TF validation gracefully when the version is too old; CI uses 1.6.6.
+DIALED's templates require Terraform 1.9+ (the bundled fck-nat network module needs `~> 1.9`). Upgrade via `brew upgrade terraform` (via `hashicorp/tap/terraform`) or download from hashicorp.com. Local `make test` skips TF validation gracefully when the version is too old; CI uses 1.9.8.
 
 ### `yq: command not found` in scripts
 
