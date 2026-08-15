@@ -86,7 +86,12 @@ locals {
 # Trust policy: allows GitHub Actions workflows running in `var.github_repo`
 # to assume the role via OIDC. For non-prod envs (dev, staging), any event
 # from any branch in the repo can assume (needed for PR workflows). For prod,
-# restricted to the main branch.
+# we trust the main-branch ref AND the `environment:prod` subject — a job that
+# declares `environment: prod` emits the latter, not a ref (see the StringLike
+# below). Because that widens who can present a valid prod subject, the "prod
+# only from main" gate now lives in the prod GitHub environment's
+# deployment-branch policy (dialed:setup locks it to main), NOT in this trust
+# policy alone.
 
 resource "aws_iam_role" "deploy" {
   for_each = local.envs
@@ -105,8 +110,20 @@ resource "aws_iam_role" "deploy" {
           StringEquals = {
             "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
           }
+          # prod: a job that declares `environment: prod` gets the subject
+          # "repo:<r>:environment:prod" — NOT the ref form — so trust both.
+          # main-only is enforced by the prod GitHub environment's
+          # deployment-branch policy (dialed:setup locks it to main), which
+          # matters because main-deploy is also workflow_dispatch-able from any
+          # branch.
+          # non-prod: the "repo:<r>:*" wildcard already covers
+          # "environment:dev"/"environment:staging", so no ref/environment
+          # split is needed there.
           StringLike = each.key == "prod" ? {
-            "token.actions.githubusercontent.com:sub" = [for r in local.oidc_sub_repos : "repo:${r}:ref:refs/heads/main"]
+            "token.actions.githubusercontent.com:sub" = concat(
+              [for r in local.oidc_sub_repos : "repo:${r}:ref:refs/heads/main"],
+              [for r in local.oidc_sub_repos : "repo:${r}:environment:prod"],
+            )
             } : {
             "token.actions.githubusercontent.com:sub" = [for r in local.oidc_sub_repos : "repo:${r}:*"]
           }
