@@ -47,3 +47,9 @@ variable "tags" {
   description = "Tags applied to every resource this module creates."
   default     = {}
 }
+
+variable "permissions_boundary_arn" {
+  type        = string
+  description = "Permissions boundary attached to the fck-nat instance role. The bootstrap tier gates the deploy role's iam:CreateRole on iam:PermissionsBoundary, so every project-prefixed role the shared-tier apply mints MUST carry the project's boundary; the name_prefix-nat role fck-nat creates is one of them. Pass the boundary ARN here so it gets bounded too, otherwise the shared-tier apply AccessDenies on CreateRole. Empty default keeps the module usable without the boundary (e.g. a project that hasn't shipped it)."
+  default     = ""
+}

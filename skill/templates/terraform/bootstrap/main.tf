@@ -79,9 +79,13 @@ locals {
 
 # ─── Per-env deploy roles ───────────────────────────────────────────────────
 #
-# Name format: dialed-deploy-{env}. This is the naming contract the runtime
-# dialed-setup composite action relies on — don't rename without also
-# updating the action.
+# Name format: dialed-{project_name}-deploy-{env}. This is the naming contract
+# the runtime dialed-setup composite action relies on — don't rename without
+# also updating the action. Project-namespaced so multiple DIALED services can
+# share one AWS account without colliding on the deploy role (the un-namespaced
+# "dialed-deploy-{env}" is per-account, so a second service in the same account
+# would clobber the first's role). The composite action derives the same name
+# from project_name.
 #
 # Trust policy: allows GitHub Actions workflows running in `var.github_repo`
 # to assume the role via OIDC. For non-prod envs (dev, staging), any event
@@ -96,7 +100,7 @@ locals {
 resource "aws_iam_role" "deploy" {
   for_each = local.envs
 
-  name = "dialed-deploy-${each.key}"
+  name = "dialed-${var.project_name}-deploy-${each.key}"
   path = "/dialed/"
 
   assume_role_policy = jsonencode({
@@ -163,26 +167,107 @@ resource "aws_iam_role_policy" "iam_scoped" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
+      # The single ManageProjectRoles statement is split into three so the
+      # role-mutation actions can be GATED on iam:PermissionsBoundary. Every
+      # ${project_name}-* role this deploy role mints or modifies MUST carry
+      # dialed-${project_name}-boundary (see boundary.tf). That makes the
+      # classic privilege-escalation chain — CreateRole/PutRolePolicy with an
+      # {Action:* Resource:*} policy → PassRole → λ/EC2 invoke → Administrator —
+      # ineffective: the boundary's Deny iam:*/organizations:*/account:* caps
+      # the effective reach of any ${project_name}-* role regardless of what
+      # policy the deploy role attaches to it. Shipping the flat, un-bounded
+      # statement is the exact Administrator-escalation hole this closes.
+
+      # 1) Boundary-enforced role mutations. AWS evaluates iam:PermissionsBoundary
+      # against either the REQUEST (CreateRole / PutRolePermissionsBoundary) or
+      # the EXISTING role's boundary (the rest). Without this condition the deploy
+      # role could create or modify a ${project_name}-* role WITHOUT a boundary;
+      # with it, every minted / mutated role is bounded.
       {
-        Sid    = "ManageProjectRoles"
+        Sid    = "ManageProjectRolesWithBoundary"
         Effect = "Allow"
         Action = [
           "iam:CreateRole",
+          "iam:PutRolePolicy",
+          "iam:DeleteRolePolicy",
+          "iam:AttachRolePolicy",
+          "iam:DetachRolePolicy",
+          # iam:PutRolePermissionsBoundary is kept — it can only SET the boundary, and the
+          # StringEquals condition below pins the value to dialed-${project_name}-boundary, so
+          # it can never point a role at a weaker boundary. It's safe.
+          #
+          # iam:DeleteRolePermissionsBoundary is deliberately OMITTED. AWS evaluates the
+          # iam:PermissionsBoundary condition for a Delete against the role's CURRENT boundary,
+          # so this statement WOULD authorize stripping the boundary off any bounded
+          # ${project_name}-* role. That reopens the escalation chain the boundary exists to
+          # close: create a bounded role -> attach AdministratorAccess ->
+          # DeleteRolePermissionsBoundary -> PassRole -> full admin. Teardown never needs it
+          # (bounded roles are removed with iam:DeleteRole in ManageProjectRolesOther, which
+          # deletes the whole role rather than un-bounding it), so dropping it is non-breaking.
+          "iam:PutRolePermissionsBoundary",
+        ]
+        Resource = [
+          "arn:aws:iam::${var.current_account_id}:role/${var.project_name}-*",
+          "arn:aws:iam::${var.current_account_id}:role/dialed/${var.project_name}-*",
+        ]
+        Condition = {
+          StringEquals = {
+            "iam:PermissionsBoundary" = "arn:aws:iam::${var.current_account_id}:policy/dialed-${var.project_name}-boundary"
+          }
+        }
+      },
+
+      # 2) PassRole, gated on the destination service. iam:PassRole supports
+      # iam:PassedToService; pinning it to a CLOSED set of in-model services
+      # stops a ${project_name}-* role being passed to an arbitrary service.
+      # The two services the generic DIALED model passes an execution role to:
+      #   - lambda.amazonaws.com — Lambda execution roles (the default app tier).
+      #   - ec2.amazonaws.com    — the network module's fck-nat NAT instance,
+      #     whose ASG launch template carries the ${project_name}-<env>-nat
+      #     instance profile; UpdateAutoScalingGroup validates PassRole to EC2
+      #     when the fck-nat AMI rolls, so omitting ec2 breaks shared-tier apply.
+      # A service that passes roles to OTHER destinations (e.g. ecs-tasks,
+      # scheduler, states) must EXTEND this list in its own copy of the template.
+      # Still resource-scoped to ${project_name}-* / dialed/${project_name}-*, so
+      # this is not a broadening to arbitrary roles.
+      {
+        Sid    = "PassProjectRole"
+        Effect = "Allow"
+        Action = "iam:PassRole"
+        Resource = [
+          "arn:aws:iam::${var.current_account_id}:role/${var.project_name}-*",
+          "arn:aws:iam::${var.current_account_id}:role/dialed/${var.project_name}-*",
+        ]
+        Condition = {
+          StringEquals = {
+            "iam:PassedToService" = [
+              "lambda.amazonaws.com",
+              "ec2.amazonaws.com",
+            ]
+          }
+        }
+      },
+
+      # 3) Read + non-boundary-enforced role-mgmt actions. These either don't
+      # support the iam:PermissionsBoundary condition (reads, UpdateAssumeRolePolicy,
+      # role metadata) or are safely scoped by resource alone (DeleteRole — removing
+      # a role is not a privilege increase). ListInstanceProfilesForRole is required
+      # for the role-delete path the AWS provider walks during destroy.
+      {
+        Sid    = "ManageProjectRolesOther"
+        Effect = "Allow"
+        Action = [
           "iam:DeleteRole",
           "iam:GetRole",
           "iam:UpdateRole",
           "iam:UpdateAssumeRolePolicy",
-          "iam:PutRolePolicy",
-          "iam:DeleteRolePolicy",
           "iam:GetRolePolicy",
           "iam:ListRolePolicies",
-          "iam:AttachRolePolicy",
-          "iam:DetachRolePolicy",
           "iam:ListAttachedRolePolicies",
+          "iam:ListInstanceProfilesForRole",
           "iam:TagRole",
           "iam:UntagRole",
           "iam:ListRoleTags",
-          "iam:PassRole",
         ]
         Resource = [
           "arn:aws:iam::${var.current_account_id}:role/${var.project_name}-*",

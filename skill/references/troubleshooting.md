@@ -58,7 +58,7 @@ Something outside Terraform's knowledge is still attached to the VPC — commonl
 
 ## Verify
 
-### `✗ IAM role dialed-deploy-dev missing`
+### `✗ IAM role dialed-{project}-deploy-dev (or legacy dialed-deploy-dev) missing`
 
 Bootstrap didn't run (or ran against a different account). Re-run `dialed:setup` or manually `cd terraform/bootstrap && terraform apply` with the right creds.
 

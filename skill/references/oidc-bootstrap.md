@@ -7,11 +7,12 @@
 Per AWS account:
 
 1. GitHub OIDC identity provider (`token.actions.githubusercontent.com`, thumbprint `6938fd4d98bab03faadb97b34396831e3780aea1`, audience `sts.amazonaws.com`).
-2. One IAM role per env that lives in this account — named `dialed-deploy-{env}` under path `/dialed/`.
+2. One IAM role per env that lives in this account — named `dialed-{project}-deploy-{env}` under path `/dialed/` (project-namespaced so multiple DIALED services can share one account; services bootstrapped before this change use the legacy `dialed-deploy-{env}` name).
 3. Each role has:
    - Trust policy federating GitHub OIDC for the specific repo.
    - Managed policy: `PowerUserAccess`.
-   - Inline policy: scoped IAM actions on project-owned roles.
+   - Inline policy: scoped IAM actions on project-owned roles, with the role-mutation actions gated on `iam:PermissionsBoundary`.
+4. One IAM permissions boundary per account — `dialed-{project}-boundary` (Deny `iam:*`/`organizations:*`/`account:*`, Allow `*`). Every `{project}-*` role the deploy role mints must carry it.
 
 ## Fully manual bootstrap
 
@@ -28,6 +29,7 @@ aws iam create-open-id-connect-provider \
 #    create a role with the trust policy pinned to your repo.
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 GITHUB_REPO="owner/name"
+PROJECT="your-project"  # .dialed.yml project_name; namespaces the role
 ENV="dev"  # repeat for staging, prod
 
 cat > /tmp/trust.json <<EOF
@@ -56,25 +58,31 @@ EOF
 # policy — you MUST lock the prod GitHub environment to main (see below).
 
 aws iam create-role \
-  --role-name dialed-deploy-${ENV} \
+  --role-name dialed-${PROJECT}-deploy-${ENV} \
   --path /dialed/ \
   --assume-role-policy-document file:///tmp/trust.json \
-  --tags Key=ManagedBy,Value=dialed Key=Project,Value=YOUR_PROJECT Key=Env,Value=${ENV}
+  --tags Key=ManagedBy,Value=dialed Key=Project,Value=${PROJECT} Key=Env,Value=${ENV}
 
 aws iam attach-role-policy \
-  --role-name dialed-deploy-${ENV} \
+  --role-name dialed-${PROJECT}-deploy-${ENV} \
   --policy-arn arn:aws:iam::aws:policy/PowerUserAccess
 
-# Inline policy — scoped IAM. Mirror bootstrap/main.tf's iam_scoped block.
+# Inline policy — scoped IAM. Mirror bootstrap/main.tf's iam_scoped block
+# (including the three-way split gating role mutations on iam:PermissionsBoundary).
 aws iam put-role-policy \
-  --role-name dialed-deploy-${ENV} \
+  --role-name dialed-${PROJECT}-deploy-${ENV} \
   --policy-name dialed-iam-scoped \
   --policy-document file:///tmp/iam-scoped.json
 
-rm /tmp/trust.json /tmp/iam-scoped.json
+# Permissions boundary — create once per account. Mirror bootstrap/boundary.tf.
+aws iam create-policy \
+  --policy-name dialed-${PROJECT}-boundary \
+  --policy-document file:///tmp/boundary.json
+
+rm /tmp/trust.json /tmp/iam-scoped.json /tmp/boundary.json
 ```
 
-`iam-scoped.json` content matches the inline policy in `terraform/bootstrap/main.tf` — copy it verbatim with the placeholders filled.
+`iam-scoped.json` content matches the inline policy in `terraform/bootstrap/main.tf` and `boundary.json` matches `terraform/bootstrap/boundary.tf` — copy them verbatim with the placeholders filled.
 
 ## Lock the prod GitHub environment to main (REQUIRED)
 
@@ -113,12 +121,18 @@ non-main code to prod.
 If the partial state is unrecoverable:
 
 ```bash
-# Delete roles (idempotent)
+# Delete roles (idempotent). PROJECT is your .dialed.yml project_name; drop the
+# "${PROJECT}-" segment for services bootstrapped before role-name namespacing.
+PROJECT="your-project"
 for env in dev staging prod; do
-  aws iam detach-role-policy --role-name dialed-deploy-$env --policy-arn arn:aws:iam::aws:policy/PowerUserAccess 2>/dev/null || true
-  aws iam delete-role-policy --role-name dialed-deploy-$env --policy-name dialed-iam-scoped 2>/dev/null || true
-  aws iam delete-role --role-name dialed-deploy-$env 2>/dev/null || true
+  aws iam detach-role-policy --role-name dialed-${PROJECT}-deploy-$env --policy-arn arn:aws:iam::aws:policy/PowerUserAccess 2>/dev/null || true
+  aws iam delete-role-policy --role-name dialed-${PROJECT}-deploy-$env --policy-name dialed-iam-scoped 2>/dev/null || true
+  aws iam delete-role --role-name dialed-${PROJECT}-deploy-$env 2>/dev/null || true
 done
+
+# Delete the permissions boundary (only after every ${PROJECT}-* role that used
+# it is gone, else DeletePolicy fails with "policy in use").
+aws iam delete-policy --policy-arn arn:aws:iam::${ACCOUNT_ID}:policy/dialed-${PROJECT}-boundary 2>/dev/null || true
 
 # Delete OIDC provider (only if no other tools depend on it — shared per account)
 aws iam delete-open-id-connect-provider \

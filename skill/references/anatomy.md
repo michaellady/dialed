@@ -24,7 +24,7 @@ Edits to the generated workflows are yours to make, but remember they won't re-r
 
 ## `.github/actions/dialed-setup/action.yml`
 
-Composite action. Reads `.dialed.yml`, derives `DIALED_ROLE_ARN = arn:aws:iam::{account_ids[env]}:role/dialed/dialed-deploy-{env}`, assumes it, installs Terraform, exports env vars. Used by every deploy workflow.
+Composite action. Reads `.dialed.yml`, derives `DIALED_ROLE_ARN = arn:aws:iam::{account_ids[env]}:role/dialed/dialed-{project_name}-deploy-{env}`, assumes it, installs Terraform, exports env vars. Used by every deploy workflow.
 
 **Environment variables exported:**
 - `DIALED_PROJECT_NAME`, `DIALED_ACCOUNT_ID`, `DIALED_ROLE_ARN`, `DIALED_WORKSPACE`, `DIALED_ENV`, `DIALED_DOMAIN`
@@ -33,9 +33,9 @@ Composite action. Reads `.dialed.yml`, derives `DIALED_ROLE_ARN = arn:aws:iam::{
 
 ## `terraform/bootstrap/`
 
-One-time setup per AWS account. Creates the GitHub OIDC identity provider and the per-env `dialed-deploy-<env>` IAM roles with trust policies scoped to `github_repo`. After bootstrap completes once per account, don't touch this unless you're changing the trust policy or role permissions.
+One-time setup per AWS account. Creates the GitHub OIDC identity provider, the per-env `dialed-{project_name}-deploy-<env>` IAM roles (project-namespaced so multiple DIALED services can share one account) with trust policies scoped to `github_repo`, and the `dialed-{project_name}-boundary` permissions boundary. After bootstrap completes once per account, don't touch this unless you're changing the trust policy or role permissions.
 
-Permissions: `PowerUserAccess` (no IAM user management) + scoped inline IAM policy allowing the role to manage project-owned IAM roles + instance profiles (needed for Lambda execution roles), with explicit deny on `iam:*User*` and `organizations:*`.
+Permissions: `PowerUserAccess` (no IAM user management) + scoped inline IAM policy allowing the role to manage project-owned IAM roles + instance profiles (needed for Lambda execution roles), with explicit deny on `iam:*User*` and `organizations:*`. The role-mutation grants are gated on `iam:PermissionsBoundary` — every `{project}-*` role the deploy role mints MUST carry `dialed-{project}-boundary` (Deny `iam:*`/`organizations:*`/`account:*`, Allow `*`), so a compromised deploy role can't create an Administrator-escalatable role. `iam:PassRole` is pinned to `lambda.amazonaws.com` + `ec2.amazonaws.com`. See `terraform/bootstrap/boundary.tf`.
 
 ## `terraform/shared/`
 
@@ -83,7 +83,8 @@ Don't collide with these — DIALED creates and manages them:
 
 - S3 buckets: `dialed-{project}-{account}-tfstate`, `dialed-{project}-{account}-tfstate-shared`.
 - DynamoDB tables: `dialed-{project}-{account}-tflocks`.
-- IAM roles: `dialed-deploy-{env}` under path `/dialed/`.
+- IAM roles: `dialed-{project}-deploy-{env}` under path `/dialed/`.
+- IAM permissions boundary: `dialed-{project}-boundary` (caps every `{project}-*` role).
 - IAM OIDC provider: `token.actions.githubusercontent.com` (one per account, shared if another tool already made it — set `assume_oidc_provider_exists=true`).
 - TF workspaces: `dev`, `staging`, `prod`, `dev-pr-<N>`.
 - Lambdas: `dialed-{project}-cleanup-{env}`.

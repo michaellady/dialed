@@ -16,6 +16,14 @@ module "fck_nat" {
   instance_type      = var.nat_instance_type
   use_spot_instances = false
 
+  # Bound the NAT instance role to the project's permissions boundary. The bootstrap
+  # tier gates the deploy role's iam:CreateRole on iam:PermissionsBoundary, so this
+  # ${var.name_prefix}-nat role must carry the boundary or the shared-tier apply
+  # AccessDenies. The fck-nat module (RaJiska/fck-nat/aws ~> 1.4, resolved 1.6.1) takes
+  # permissions_boundary_arn and applies it to that role (its iam.tf). It expects null
+  # for "no boundary", so coalesce our empty-string default to null.
+  permissions_boundary_arn = var.permissions_boundary_arn != "" ? var.permissions_boundary_arn : null
+
   tags = var.tags
 }
 

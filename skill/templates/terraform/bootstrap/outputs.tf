@@ -12,3 +12,8 @@ output "account_id" {
   value       = data.aws_caller_identity.current.account_id
   description = "Echo-back of the account these resources live in, for sanity checks."
 }
+
+output "permissions_boundary_arn" {
+  value       = aws_iam_policy.boundary.arn
+  description = "ARN of the permissions-boundary policy capping every project-* role. Stack/shared tiers reference this by predictable ARN (account_id + name) to avoid a cross-tier remote-state dependency on bootstrap."
+}

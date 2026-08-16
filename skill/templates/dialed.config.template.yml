@@ -9,7 +9,7 @@
 # Re-run `dialed:verify` after edits to confirm the state still matches.
 #
 # Role ARNs are intentionally NOT stored here — they're derived at runtime
-# as `arn:aws:iam::{account_id}:role/dialed-deploy-{env}`.
+# as `arn:aws:iam::{account_id}:role/dialed/dialed-{project_name}-deploy-{env}`.
 
 # ─── Project identity ───────────────────────────────────────────────────────
 

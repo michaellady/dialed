@@ -47,7 +47,7 @@ Questions, in order:
 Before running any AWS commands, summarize the plan for the user and wait for explicit "yes". Include:
 
 - Which accounts get bootstrapped (S3 bucket + DynamoDB table created in each).
-- Which accounts get an OIDC IAM role set (one `dialed-deploy-{env}` per env).
+- Which accounts get an OIDC IAM role set (one `dialed-{project}-deploy-{env}` per env) plus the `dialed-{project}-boundary` permissions boundary.
 - That the prod GitHub environment will be created (if absent) and locked to `main` — the branch gate for prod deploys.
 - If needs_vpc=y: which envs get a VPC created (list with estimated cost: ~$3-5/mo per env with fck-nat, ~$32/mo per env if nat_mode=managed later).
 - Total rough monthly cost estimate.

@@ -24,7 +24,7 @@ If you're maintaining roxas (or a project patterned on it) and want to adopt DIA
 
 Migration:
 
-1. Run DIALED's `terraform/bootstrap/` in each AWS account — it creates the GitHub OIDC identity provider and one `dialed-deploy-<env>` role per env.
+1. Run DIALED's `terraform/bootstrap/` in each AWS account — it creates the GitHub OIDC identity provider, one `dialed-<project>-deploy-<env>` role per env, and the `dialed-<project>-boundary` permissions boundary.
 2. Add `permissions: { id-token: write, contents: read }` to every deploy workflow.
 3. Delete `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_REGION` from GitHub secrets.
 4. Replace the old `configure-aws-credentials` block with `uses: ./.github/actions/dialed-setup`.

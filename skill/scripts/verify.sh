@@ -168,18 +168,43 @@ for env in "${ENVS[@]}"; do
     fi
   fi
 
-  role_name="dialed-deploy-${env}"
-  role_arn_expected="arn:aws:iam::${aid}:role/dialed/${role_name}"
+  # Deploy role. New setups use the project-namespaced name
+  # (dialed-${PROJECT}-deploy-${env}); services bootstrapped before the
+  # namespacing change (e.g. Lore) still use the legacy per-account name
+  # (dialed-deploy-${env}). Probe the namespaced name first, fall back to
+  # legacy on a 404 so verify passes for BOTH.
+  role_name="dialed-${PROJECT}-deploy-${env}"
+  if ! aws iam get-role --role-name "$role_name" >/dev/null 2>&1; then
+    if aws iam get-role --role-name "dialed-deploy-${env}" >/dev/null 2>&1; then
+      role_name="dialed-deploy-${env}"
+    fi
+  fi
   if aws iam get-role --role-name "$role_name" >/dev/null 2>&1; then
     ok "IAM role $role_name (env=$env)"
     trust=$(aws iam get-role --role-name "$role_name" --query 'Role.AssumeRolePolicyDocument' --output json 2>/dev/null | python3 -c 'import sys,json,urllib.parse; d=json.loads(sys.stdin.read()); print(json.dumps(d) if isinstance(d,dict) else urllib.parse.unquote(sys.stdin.read()))' 2>/dev/null || echo "")
-    if echo "$trust" | grep -q "$GITHUB_REPO"; then
+    # Anchored on "repo:<repo>:" — the sub claim always follows the repo with a
+    # colon, so this rejects a look-alike suffix (e.g. repo:owner/name-attacker:*)
+    # that an unanchored substring match would wrongly accept. The classic
+    # owner/name form is always present in the trust policy even for orgs that
+    # also emit immutable subjects, so matching it is sufficient.
+    if echo "$trust" | grep -qF "repo:${GITHUB_REPO}:"; then
       ok "  trust policy references $GITHUB_REPO"
     else
-      bad "  trust policy does not reference $GITHUB_REPO"
+      bad "  trust policy does not reference $GITHUB_REPO (anchored repo:${GITHUB_REPO}:)"
     fi
   else
-    bad "IAM role $role_name missing in account $aid"
+    bad "IAM role dialed-${PROJECT}-deploy-${env} (or legacy dialed-deploy-${env}) missing in account $aid"
+  fi
+
+  # Permissions boundary — the default hardening capping every ${PROJECT}-*
+  # role so the deploy role can't mint an Administrator-escalatable role.
+  # Advisory (does NOT increment fail): services bootstrapped before boundaries
+  # became the default still work, so their absence isn't a hard failure — but a
+  # missing boundary means re-running dialed:setup will harden the deploy role.
+  if aws iam get-policy --policy-arn "arn:aws:iam::${aid}:policy/dialed-${PROJECT}-boundary" >/dev/null 2>&1; then
+    ok "permissions boundary dialed-${PROJECT}-boundary (account $aid)"
+  else
+    echo "  ⚠ permissions boundary dialed-${PROJECT}-boundary missing (account $aid) — re-run dialed:setup to harden the deploy role (pre-boundary setups still deploy, but lack the escalation cap)"
   fi
 done
 
