@@ -92,6 +92,7 @@ cp "$DIALED_HOME/skill/templates/workflows/pr-deploy.yml" .github/workflows/
 cp "$DIALED_HOME/skill/templates/workflows/pr-cleanup.yml" .github/workflows/
 cp "$DIALED_HOME/skill/templates/workflows/test.yml" .github/workflows/
 cp "$DIALED_HOME/skill/templates/workflows/main-deploy.${MODEL_SLUG}.yml" .github/workflows/main-deploy.yml
+cp "$DIALED_HOME/skill/templates/workflows/release-summary.yml" .github/workflows/
 
 if [ "$STALE_WARN" = "true" ]; then
   cp "$DIALED_HOME/skill/templates/workflows/pr-stale-warn.yml" .github/workflows/

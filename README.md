@@ -9,6 +9,7 @@ A Claude Code skill that bootstraps GitHub Actions + Terraform + AWS deployment 
 - **Per-PR stacks.** Every PR gets its own isolated Terraform workspace in the dev AWS account. Open a PR, a real stack comes up; close the PR, it tears down.
 - **Staged tests.** Unit + integration pre-deploy (fast fail), system tests against the live PR stack, smoke tests post-prod.
 - **Dev → prod promotion.** Merge to main auto-deploys through dev (and optionally staging) into prod.
+- **Releases people can read.** Every successful prod deploy mints a GitHub Release (auto-incrementing semver, idempotent, only after smoke), and a best-effort Claude pass rewrites it for non-technical readers: plain-English title, `## Summary` first, technical detail collapsed under `<details>`. One optional secret (`CLAUDE_CODE_OAUTH_TOKEN`); without it releases keep their deterministic notes.
 - **AWS OIDC, least-privilege.** No long-lived access keys in GitHub secrets. Deploy-role trust is narrowed to the exact OIDC subjects DIALED jobs emit (prod: `environment:prod` only; dev/staging: `pull_request` + `environment:<env>`), so a comment-triggered / main-branch bot can't assume a deploy role.
 - **Environment + branch gating.** Setup creates GitHub Environments (prod locked to `main`, the branch gate for prod deploys) and a default-branch protection rule (PR + up-to-date passing checks required to merge).
 - **Foundational VPC included.** Shared network tier with fck-nat (~$3–5/mo) so PR stacks can live inside a long-lived VPC without re-creating one each time.

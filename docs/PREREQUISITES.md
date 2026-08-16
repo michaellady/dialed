@@ -34,7 +34,7 @@ Once OIDC is bootstrapped, day-to-day deploys use the scoped `dialed-<project>-d
 
 - Ability to push to the repository where DIALED is being installed.
 - **Admin** rights on the repo. Setup uses `gh api` to create GitHub Environments (the `prod` environment locked to `main` — the branch gate for prod deploys — plus `dev`/`staging` with no branch policy) and a default-branch protection rule on `main` (require a PR + up-to-date passing status checks before merging). These endpoints require admin; without it, setup fails at the environment/branch-protection step.
-- Ability to create GitHub Actions secrets is **not** required (OIDC replaces secrets for AWS auth).
+- Ability to create GitHub Actions secrets is **not** required for AWS (OIDC replaces secrets for AWS auth). The one optional secret is `CLAUDE_CODE_OAUTH_TOKEN`, used only by the best-effort release-notes rewrite (`release-summary.yml`); without it, releases keep their deterministic notes.
 - Workflow permissions must allow `id-token: write` (the default for most repos; confirm at `Settings → Actions → General → Workflow permissions`).
 - `gh` must be authenticated (`gh auth status`) as a user with the admin rights above.
 
