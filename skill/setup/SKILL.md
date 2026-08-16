@@ -96,9 +96,10 @@ Stream its output. It will:
 Print this checklist and stop:
 
 1. Review the generated files. The biggest one to customize is `terraform/stack/main.tf` (look for the `# YOUR RESOURCES HERE` marker) and `terraform/stack/outputs.tf` (define `stack_url`).
-2. Commit: `git add -A && git commit -m "Add DIALED deploy pipeline" && git push`.
-3. Open a test PR against `main` and confirm `pr-deploy` runs, deploys, and comments with a stack URL.
-4. Re-run `dialed:verify` anytime to confirm the setup is still consistent.
+2. Optional but recommended: add a `CLAUDE_CODE_OAUTH_TOKEN` repository secret (`gh secret set CLAUDE_CODE_OAUTH_TOKEN`) so every prod release gets rewritten for non-technical readers — plain-English title, `## Summary` first, technical detail collapsed under `<details>` (`release-summary.yml`, dispatched by the main-deploy `release` job). Without the secret, releases are still minted with deterministic notes; only the plain-English rewrite is skipped.
+3. Commit: `git add -A && git commit -m "Add DIALED deploy pipeline" && git push`.
+4. Open a test PR against `main` and confirm `pr-deploy` runs, deploys, and comments with a stack URL.
+5. Re-run `dialed:verify` anytime to confirm the setup is still consistent.
 
 ## If setup fails partway
 

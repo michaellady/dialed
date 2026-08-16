@@ -1,0 +1,107 @@
+name: Release Summary
+
+# Rewrites a GitHub Release for non-technical readers: a plain-English title, a
+# "## Summary" section on top, and the full technical body preserved but collapsed
+# under a <details> block — so a non-technical teammate can relay the update to
+# clients straight from the releases page.
+#
+# Requires a CLAUDE_CODE_OAUTH_TOKEN repository secret (the one optional secret in
+# DIALED — AWS auth stays OIDC). Without it this run fails, releases keep their
+# deterministic notes, and the deploy chain is untouched.
+#
+# Why a separate workflow: claude-code-action@v1 refuses `push` events ("Unsupported
+# event type: push"), and Main Deploy — where releases are minted — runs on push.
+# workflow_dispatch IS a supported event, so the deploy chain's release job dispatches
+# this instead (GITHUB_TOKEN may create workflow_dispatch events, so no PAT is
+# needed). Best-effort by design: the deterministic release body already stands; if
+# this run fails the release is merely unpolished.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to summarize (e.g. v0.0.7)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  summarize:
+    name: Plain-English summary
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # edit the release
+      id-token: write # claude-code-action
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }} # the released commit, so git log/show describe what shipped
+          fetch-depth: 1
+      - uses: anthropics/claude-code-action@v1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # The deploy chain dispatches this via GITHUB_TOKEN, so the actor is the
+          # github-actions bot — allow exactly that one (the action rejects bots by default).
+          allowed_bots: 'github-actions'
+          prompt: |
+            Release ${{ inputs.tag }} of this repository was just created; the checked-out
+            commit is the one now live on production.
+
+            The finished release must read for a NON-TECHNICAL reader first — a teammate
+            relaying the update to clients, or a customer reading an announcement — with
+            the technical record preserved but collapsed.
+
+            1. Read the release: `gh release view ${{ inputs.tag }}`. For more context read
+               the commit itself (`git log -1`, `git show --stat HEAD`).
+            2. Write a `## Summary` section: 2-4 plain-English sentences for that reader
+               saying what changed for them and why it matters. No jargon, no file paths,
+               no internal codenames, no PR/issue numbers. If the change is purely internal
+               (infra, CI, tests, docs), one honest sentence like "Behind-the-scenes
+               reliability work; nothing changes in the product." is exactly right — never
+               oversell.
+            3. Write a plain-English release TITLE in the same voice: under ~60 characters,
+               no jargon or ticket numbers. A feature reads like "Scans now cover key pages
+               across your store"; internal work reads like "Behind the scenes: security
+               hardening".
+            4. Rebuild the body: the `## Summary` section on top, then the ENTIRE existing
+               body wrapped in a collapsed block —
+
+               <details>
+               <summary>Technical details</summary>
+
+               ...existing body, unchanged...
+
+               </details>
+
+               Collapse the existing content, never delete it.
+            5. Apply both edits: use the Write tool to write the full new body to a file
+               (e.g. /tmp/notes.md), then run
+               `gh release edit ${{ inputs.tag }} --title "<new title>" --notes-file /tmp/notes.md`.
+          # Write/Read are required: without an allowed way to CREATE the notes file the
+          # action completes "successfully" while every edit is permission-denied.
+          claude_args: '--allowed-tools "Write,Read,Bash(gh release view:*),Bash(gh release edit:*),Bash(git log:*),Bash(git show:*),Bash(git diff:*)"'
+      # The action exits 0 even when every edit was permission-denied — verify the rewrite
+      # actually landed so a silent no-op shows as a red run here (never touches the deploy).
+      - name: Verify the rewrite landed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          body=$(gh release view "${{ inputs.tag }}" --json body --jq .body)
+          if ! printf '%s\n' "$body" | grep -q '^## Summary'; then
+            echo "::error::release ${{ inputs.tag }} has no '## Summary' section — the edit did not land"
+            exit 1
+          fi
+          if ! printf '%s\n' "$body" | grep -q '<details>'; then
+            echo "::error::release ${{ inputs.tag }} has no collapsed <details> block — the technical body was not collapsed"
+            exit 1
+          fi
+          # The deploy chain titles the release with the squashed PR title, which ends
+          # in "(#NNN)" — if that suffix survives, the plain-English retitle didn't land.
+          if gh release view "${{ inputs.tag }}" --json name --jq .name | grep -qE '\(#[0-9]+\)$'; then
+            echo "::error::release ${{ inputs.tag }} still carries the raw PR title — the retitle did not land"
+            exit 1
+          fi

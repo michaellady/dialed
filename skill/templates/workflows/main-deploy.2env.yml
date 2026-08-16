@@ -1,8 +1,8 @@
 name: Main Deploy (2-env)
 
-# Push to main → dev → system tests → prod → smoke tests. Fully automated.
-# This is the 2-env variant; the 3-env variant inserts a staging tier
-# between dev and prod.
+# Push to main → dev → system tests → prod → smoke tests → release. Fully
+# automated. This is the 2-env variant; the 3-env variant inserts a staging
+# tier between dev and prod.
 
 on:
   push:
@@ -157,3 +157,101 @@ jobs:
         env:
           STACK_URL: ${{ needs.deploy-prod.outputs.stack_url }}
         run: eval "$DIALED_TEST_SMOKE_CMD"
+
+  # ─── Release: the "prod is live" event ────────────────────────────────────────────────
+  #
+  # A GitHub Release is created on every SUCCESSFUL prod deploy — never on merge. Merge
+  # and deploy diverge exactly when it matters: a merge whose chain fails must never be
+  # announced. Release-published is therefore the one event downstream automation
+  # (announcements, Slack release subscriptions, changelogs) can trust to mean "serving
+  # in prod".
+  #
+  # Tag scheme: auto-incrementing semver — highest existing vX.Y.Z tag + 1 on patch,
+  # starting at v0.0.1 (non-semver tags are ignored). To cut a minor/major, create that
+  # release by hand once (plain vX.Y.0 — no -rc/pre-release suffixes, the increment does
+  # integer arithmetic on patch) and the auto-increment continues from it. Idempotent: a
+  # re-run — or a re-deploy of an unchanged commit — finds a semver tag already pointing
+  # at the SHA and skips, so one commit == one version.
+  #
+  # Body: deterministic base first (the squash commit's message + GitHub's generated PR
+  # links), then a best-effort dispatched Claude pass rewrites it for non-technical
+  # readers — plain-English title, "## Summary" on top, technical detail collapsed (see
+  # release-summary.yml; needs the CLAUDE_CODE_OAUTH_TOKEN secret). The dispatch is
+  # continue-on-error — release creation never depends on it, and a red polish step must
+  # not repaint a green deploy.
+  release:
+    name: Release (prod is live)
+    needs: [deploy-prod, smoke-test-prod]
+    # smoke-test-prod is skipped when the stack exposes no URL — release on deploy
+    # success with smoke green-or-skipped, never after a failure or cancellation.
+    if: ${{ !cancelled() && needs.deploy-prod.result == 'success' && (needs.smoke-test-prod.result == 'success' || needs.smoke-test-prod.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the tag + release
+      actions: write # dispatch the Release Summary workflow
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # semver scan needs all tags; the latest-marker guard needs ancestry
+      - name: Create release
+        id: create
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag_pattern='v[0-9]*.[0-9]*.[0-9]*'
+          # Idempotence: one commit == one version. A re-run (or a re-deploy of an
+          # unchanged commit) finds its semver tag already on the SHA and skips.
+          existing="$(git tag -l "$tag_pattern" --points-at "${{ github.sha }}" | sort -V | tail -1)"
+          if [ -n "$existing" ]; then
+            echo "commit already released as $existing — nothing to do"
+            echo "created=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          title="$(git log -1 --pretty=%s)"
+          # GitHub's squash-merge normalizes trailer casing to "Co-authored-by" — match
+          # case-insensitively (GNU sed /I; runners are Ubuntu), and drop the PR-body footer.
+          body="$(git log -1 --pretty=%b | sed '/^co-authored-by:/Id; /Generated with \[Claude Code\]/d')"
+          created=""
+          for attempt in 1 2 3; do
+            latest="$(git tag -l "$tag_pattern" | sort -V | tail -1)"
+            IFS=. read -r major minor patch <<<"${latest:-v0.0.0}"
+            major="${major#v}"
+            tag="v${major}.${minor}.$((patch + 1))"
+            # Releasing OLDER code late (a re-run of an old failed run after newer commits
+            # already released) must not steal the "latest" marker downstream automation
+            # reads: if this commit is an ancestor of the current latest tag's commit, mark
+            # the release non-latest.
+            latest_flag=""
+            if [ -n "$latest" ]; then
+              latest_commit="$(git rev-list -n 1 "$latest")"
+              if [ "$latest_commit" != "${{ github.sha }}" ] && git merge-base --is-ancestor "${{ github.sha }}" "$latest_commit"; then
+                latest_flag="--latest=false"
+              fi
+            fi
+            if printf '## What shipped\n\n%s\n' "$body" | gh release create "$tag" \
+              --target "${{ github.sha }}" \
+              --title "$title" \
+              --notes-file - \
+              --generate-notes \
+              $latest_flag; then
+              created="$tag"
+              break
+            fi
+            echo "creating $tag failed (parallel release race, attempt $attempt) — refetching tags"
+            git fetch --tags --quiet
+          done
+          if [ -z "$created" ]; then
+            echo "::error::could not create a release after 3 attempts"
+            exit 1
+          fi
+          echo "created=true" >> "$GITHUB_OUTPUT"
+          echo "tag=$created" >> "$GITHUB_OUTPUT"
+      # claude-code-action@v1 refuses `push` events, so the rewrite runs as a dispatched
+      # Release Summary workflow (workflow_dispatch IS supported; GITHUB_TOKEN may create
+      # workflow_dispatch events). Best-effort: a failed dispatch never repaints the deploy.
+      - name: Dispatch plain-English rewrite (Claude, best-effort)
+        if: steps.create.outputs.created == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run release-summary.yml --ref main -f tag="${{ steps.create.outputs.tag }}"

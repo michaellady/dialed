@@ -7,7 +7,7 @@ DIALED is a Claude Code skill that scaffolds GitHub Actions + Terraform + AWS in
 ```
 PR open/sync    ────▶  unit+int tests ▶ tf apply (dev-pr-N) ▶ wait-ready ▶ system tests
 PR close        ────▶  tf destroy (3 retries) + orphan cleanup Lambda
-push to main    ────▶  unit+int ▶ dev ▶ system ▶ [staging ▶ system+smoke] ▶ prod ▶ smoke
+push to main    ────▶  unit+int ▶ dev ▶ system ▶ [staging ▶ system+smoke] ▶ prod ▶ smoke ▶ release
 cron (daily)    ────▶  comment on PRs idle > N days
 path: shared/** ────▶  deploy shared tier per env
 ```
@@ -81,6 +81,10 @@ DIALED's pitch is "see the real stack before merging." Teams that prefer `terraf
 ### Why fully-automated prod deploys
 
 The default `main-deploy` flow goes dev → system → prod → smoke with no human gate. The gate IS the test suite — if unit, integration, and system tests all pass, prod deploys. Projects that want manual prod approval can add a GitHub `environment: prod` protection rule requiring reviewer approval; DIALED doesn't force it.
+
+### Why the release is minted on deploy, not merge
+
+A GitHub Release is created only after the prod chain succeeds. Merge and deploy diverge exactly when it matters — a merge whose chain fails must never be announced — so release-published is the one event downstream automation (announcements, Slack release subscriptions, changelogs) can trust to mean "serving in prod". A dispatched, best-effort workflow (`release-summary.yml`, gated on the optional `CLAUDE_CODE_OAUTH_TOKEN` secret) then rewrites each release for non-technical readers — plain-English title, `## Summary` on top, the full technical body collapsed under `<details>` — so a non-technical teammate can relay updates to clients straight from the releases page. Release creation never depends on the rewrite: no secret or a red rewrite run just leaves the deterministic notes standing.
 
 ## Scaling paths
 
