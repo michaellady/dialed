@@ -80,8 +80,10 @@ runs:
           exit 1
         fi
 
-        # Role ARN convention — must match bootstrap TF's naming
-        role_arn="arn:aws:iam::${account_id}:role/dialed/dialed-deploy-${ENV}"
+        # Role ARN convention — must match bootstrap TF's naming. Project-scoped
+        # (dialed-${project_name}-deploy-${ENV}) so multiple DIALED services can
+        # share one AWS account without colliding on the deploy role.
+        role_arn="arn:aws:iam::${account_id}:role/dialed/dialed-${project_name}-deploy-${ENV}"
 
         # Workspace derivation:
         #   PR event  → {env}-pr-{PR_NUMBER}  (PR stacks)

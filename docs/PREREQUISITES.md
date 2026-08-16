@@ -28,7 +28,7 @@ The credentials you have locally when running `dialed:setup` (typically an admin
 - Create IAM OIDC identity providers, roles, and policies.
 - Read account identity (`sts:GetCallerIdentity`).
 
-Once OIDC is bootstrapped, day-to-day deploys use the scoped `dialed-deploy-<env>` role — your local creds are only needed during initial setup and recovery.
+Once OIDC is bootstrapped, day-to-day deploys use the scoped `dialed-<project>-deploy-<env>` role — your local creds are only needed during initial setup and recovery.
 
 ## GitHub permissions
 

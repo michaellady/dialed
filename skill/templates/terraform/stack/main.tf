@@ -17,6 +17,16 @@ locals {
   is_pr_stack = var.pr_number != ""
   pr_suffix   = local.is_pr_stack ? "-pr-${var.pr_number}" : ""
   name_prefix = "${var.project_name}-${var.environment}${local.pr_suffix}"
+
+  # Permissions boundary that caps every ${var.project_name}-* role (created by
+  # the bootstrap tier, terraform/bootstrap/boundary.tf). Referenced by a
+  # PREDICTABLE ARN — account_id + fixed name — so there's no cross-tier
+  # remote_state dependency on bootstrap. EVERY IAM role this stack creates MUST
+  # set `permissions_boundary = local.boundary_arn`: the deploy role's
+  # ManageProjectRolesWithBoundary statement will AccessDeny any CreateRole that
+  # omits it, so an un-bounded (escalatable) ${var.project_name}-* role can never
+  # be minted. See the commented example under "YOUR RESOURCES HERE".
+  boundary_arn = "arn:aws:iam::${var.account_ids[var.environment]}:policy/dialed-${var.project_name}-boundary"
 }
 
 # ─── Shared-tier wiring ─────────────────────────────────────────────────────
@@ -49,6 +59,15 @@ locals {
 }
 
 # ─── YOUR RESOURCES HERE ────────────────────────────────────────────────────
+#
+# Any IAM role you create MUST carry the permissions boundary, or the deploy
+# role's CreateRole will be denied (see local.boundary_arn above):
+#
+#   resource "aws_iam_role" "api" {
+#     name                 = "${local.name_prefix}-api-exec"
+#     assume_role_policy   = data.aws_iam_policy_document.lambda_assume.json
+#     permissions_boundary = local.boundary_arn   # ← required on every role
+#   }
 #
 # Example (Lambda inside shared VPC):
 #

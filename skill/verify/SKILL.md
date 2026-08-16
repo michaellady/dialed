@@ -27,7 +27,7 @@ Stream output. The script checks, per account:
 - DynamoDB lock table `dialed-{project}-{account}-tflocks` exists.
 - (If needs_vpc=y) shared-tier state bucket `dialed-{project}-{account}-tfstate-shared` exists.
 - GitHub OIDC provider is present in the account.
-- Per-env IAM roles `dialed-deploy-{env}` exist with trust policies scoped to `github_repo`.
+- Per-env IAM roles `dialed-{project}-deploy-{env}` exist with trust policies scoped to `github_repo` (legacy un-namespaced `dialed-deploy-{env}` roles are also accepted for services bootstrapped before namespacing). The `dialed-{project}-boundary` permissions boundary is present.
 - Derived role ARNs match the naming convention DIALED's runtime expects.
 
 Per-repo:

@@ -51,7 +51,7 @@ Before running `dialed:setup` in a consumer project, you need:
 - Permissions to create S3 buckets, DynamoDB tables, IAM OIDC providers, IAM roles + policies.
 - Ability to run `aws sts get-caller-identity`.
 
-Once OIDC is bootstrapped, day-to-day deploys use the scoped `dialed-deploy-<env>` role — your local creds are only needed for initial setup and recovery.
+Once OIDC is bootstrapped, day-to-day deploys use the scoped `dialed-<project>-deploy-<env>` role — your local creds are only needed for initial setup and recovery.
 
 **GitHub permissions**:
 
