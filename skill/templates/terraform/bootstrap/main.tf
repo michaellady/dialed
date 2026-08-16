@@ -87,15 +87,21 @@ locals {
 # would clobber the first's role). The composite action derives the same name
 # from project_name.
 #
-# Trust policy: allows GitHub Actions workflows running in `var.github_repo`
-# to assume the role via OIDC. For non-prod envs (dev, staging), any event
-# from any branch in the repo can assume (needed for PR workflows). For prod,
-# we trust the main-branch ref AND the `environment:prod` subject — a job that
-# declares `environment: prod` emits the latter, not a ref (see the StringLike
-# below). Because that widens who can present a valid prod subject, the "prod
-# only from main" gate now lives in the prod GitHub environment's
-# deployment-branch policy (dialed:setup locks it to main), NOT in this trust
-# policy alone.
+# Trust policy: allows GitHub Actions workflows in `var.github_repo` to assume
+# the role via OIDC, narrowed to the EXACT OIDC subjects DIALED's own workflow
+# jobs emit — NOT a blanket "repo:<r>:*" wildcard.
+#   - non-prod (dev, staging): PR jobs (subject "repo:<r>:pull_request") and
+#     env-declared jobs (subject "repo:<r>:environment:<env>", e.g. deploy-dev
+#     and the now-env-gated unit-and-integration / system-test-dev).
+#   - prod: ONLY env-declared jobs (subject "repo:<r>:environment:prod").
+# Dropping the wildcard AND the bare "ref:refs/heads/main" subject is the point:
+# any OTHER main-branch / comment-triggered workflow that carries
+# id-token:write — notably an @claude bot answering a PR comment — would
+# otherwise present one of those subjects and assume the deploy role. Because
+# the prod branch no longer trusts a ref, the "prod only from main" gate now
+# lives in the prod GitHub environment's deployment-branch policy (dialed:setup
+# locks it to main), which is load-bearing since main-deploy is also
+# workflow_dispatch-able from any branch. See the StringLike below.
 
 resource "aws_iam_role" "deploy" {
   for_each = local.envs
@@ -114,22 +120,26 @@ resource "aws_iam_role" "deploy" {
           StringEquals = {
             "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
           }
-          # prod: a job that declares `environment: prod` gets the subject
-          # "repo:<r>:environment:prod" — NOT the ref form — so trust both.
-          # main-only is enforced by the prod GitHub environment's
-          # deployment-branch policy (dialed:setup locks it to main), which
-          # matters because main-deploy is also workflow_dispatch-able from any
-          # branch.
-          # non-prod: the "repo:<r>:*" wildcard already covers
-          # "environment:dev"/"environment:staging", so no ref/environment
-          # split is needed there.
+          # prod: reachable ONLY via jobs that declare `environment: prod`
+          # (deploy-prod, shared-prod, smoke-test-prod — all env-gated), whose
+          # subject is "repo:<r>:environment:prod". The bare
+          # "repo:<r>:ref:refs/heads/main" subject was REMOVED so a main-branch
+          # bot (e.g. comment-triggered @claude, which carries id-token:write)
+          # can no longer assume the prod role. main-only is enforced by the
+          # prod GitHub environment's deployment-branch policy (dialed:setup
+          # locks it to main), which matters because main-deploy is also
+          # workflow_dispatch-able from any branch.
+          # non-prod: reachable via PR jobs ("repo:<r>:pull_request") and
+          # env-declared jobs ("repo:<r>:environment:<env>"). The old
+          # "repo:<r>:*" wildcard was dropped for the same reason — it admitted
+          # the bare "ref:refs/heads/main" subject a main-branch bot presents.
           StringLike = each.key == "prod" ? {
-            "token.actions.githubusercontent.com:sub" = concat(
-              [for r in local.oidc_sub_repos : "repo:${r}:ref:refs/heads/main"],
-              [for r in local.oidc_sub_repos : "repo:${r}:environment:prod"],
-            )
+            "token.actions.githubusercontent.com:sub" = [for r in local.oidc_sub_repos : "repo:${r}:environment:prod"]
             } : {
-            "token.actions.githubusercontent.com:sub" = [for r in local.oidc_sub_repos : "repo:${r}:*"]
+            "token.actions.githubusercontent.com:sub" = concat(
+              [for r in local.oidc_sub_repos : "repo:${r}:pull_request"],
+              [for r in local.oidc_sub_repos : "repo:${r}:environment:${each.key}"],
+            )
           }
         }
       }

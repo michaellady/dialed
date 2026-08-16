@@ -17,6 +17,10 @@ jobs:
   unit-and-integration:
     name: Unit + integration tests
     runs-on: ubuntu-latest
+    # environment:dev so this job's OIDC subject is repo:<r>:environment:dev.
+    # The narrowed non-prod trust (bootstrap/main.tf) no longer admits the bare
+    # ref:refs/heads/main subject a plain push job would otherwise present.
+    environment: dev
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dialed-setup
@@ -79,6 +83,8 @@ jobs:
     name: System tests (dev)
     needs: deploy-dev
     runs-on: ubuntu-latest
+    # environment:dev — see unit-and-integration; keeps the OIDC subject env-scoped.
+    environment: dev
     if: needs.deploy-dev.outputs.stack_url != ''
     steps:
       - uses: actions/checkout@v4
@@ -137,6 +143,10 @@ jobs:
     name: Smoke tests (prod)
     needs: deploy-prod
     runs-on: ubuntu-latest
+    # environment:prod so this job's OIDC subject is repo:<r>:environment:prod.
+    # The narrowed prod trust (bootstrap/main.tf) trusts ONLY that subject — the
+    # bare ref:refs/heads/main was removed — so this job MUST declare the env.
+    environment: prod
     if: needs.deploy-prod.outputs.stack_url != ''
     steps:
       - uses: actions/checkout@v4

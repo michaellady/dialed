@@ -46,6 +46,16 @@ NEEDS_VPC=$(yq -r '.needs_vpc' .dialed.yml)
 VPC_CIDR=$(yq -r '.vpc_cidr // "10.0.0.0/16"' .dialed.yml)
 STALE_WARN=$(yq -r '.enable_stale_pr_warning' .dialed.yml)
 
+# Required status checks for the default-branch protection rule. Contexts are
+# workflow JOB names (the `name:` field on a job). Override in .dialed.yml under
+# `branch_protection.required_checks: [ ... ]`; otherwise default to the DIALED
+# job names. The operator MUST confirm these match the repo's actual check names
+# before relying on them — a mistyped context silently never blocks a merge.
+mapfile -t REQUIRED_CHECKS < <(yq -r '.branch_protection.required_checks[]?' .dialed.yml 2>/dev/null)
+if [ "${#REQUIRED_CHECKS[@]}" -eq 0 ]; then
+  REQUIRED_CHECKS=("Unit + integration tests" "Deploy PR stack to dev" "System tests against PR stack")
+fi
+
 if [ "$ENV_MODEL" = "3-env" ]; then
   ENVS=(dev staging prod)
 else
@@ -169,35 +179,93 @@ for aid in "${!account_envs_ordered[@]}"; do
   popd >/dev/null
 done
 
-# ─── Lock the prod GitHub environment to main ───────────────────────────────
+# ─── GitHub Environments + default-branch protection ────────────────────────
 #
-# The prod deploy role trusts the `environment:prod` OIDC subject (jobs that
-# declare `environment: prod` emit that subject, not the branch ref). That
-# moves the "prod deploys only from main" gate OFF the AWS trust policy and
-# ONTO the prod GitHub environment's deployment-branch policy. main-deploy is
-# also workflow_dispatch-able from ANY branch, so without this lock a non-main
-# branch could dispatch a deploy that assumes the prod role. Create + lock the
-# environment now. Idempotent: re-running just re-asserts the policy.
+# The deploy roles now trust NARROWED OIDC subjects (see terraform/bootstrap/
+# main.tf): prod trusts only `environment:prod`; dev/staging trust
+# `pull_request` + `environment:<env>`. That moves the "prod deploys only from
+# main" gate OFF the AWS trust policy and ONTO the prod GitHub environment's
+# deployment-branch policy — so prod MUST be locked to main here (main-deploy is
+# workflow_dispatch-able from ANY branch, so an unlocked prod env would let a
+# non-main branch dispatch a prod deploy). dev/staging are created with NO
+# branch policy (PR-driven; jobs run from PR branches and main). Finally, protect
+# the default branch: require a PR + up-to-date passing status checks to merge.
+# All idempotent.
 
-if printf '%s\n' "${ENVS[@]}" | grep -qx prod; then
+# configure_environments <repo> <env>...
+configure_environments() {
+  local repo="$1"; shift
+  local env
+  for env in "$@"; do
+    if [ "$env" = "prod" ]; then
+      echo ""
+      echo "==> Locking prod GitHub environment (${repo}) to 'main'"
+      gh api --method PUT "repos/${repo}/environments/prod" \
+        -F "deployment_branch_policy[protected_branches]=false" \
+        -F "deployment_branch_policy[custom_branch_policies]=true" \
+        >/dev/null
+      # Add the 'main' policy only if absent — POST is not idempotent (a
+      # duplicate name 422s).
+      if ! gh api "repos/${repo}/environments/prod/deployment-branch-policies" \
+          --jq '.branch_policies[].name' 2>/dev/null | grep -qx main; then
+        gh api --method POST "repos/${repo}/environments/prod/deployment-branch-policies" \
+          -f name=main >/dev/null
+      fi
+      echo "✓ prod environment locked to main"
+    else
+      echo ""
+      echo "==> Creating '${env}' GitHub environment (${repo}) — no branch policy"
+      # deployment_branch_policy: null → all branches may deploy to this env
+      # (PR heads + main). Creating it explicitly (rather than letting the first
+      # deploy auto-create it) keeps setup self-contained and idempotent.
+      gh api --method PUT "repos/${repo}/environments/${env}" \
+        --input - >/dev/null <<'JSON'
+{"deployment_branch_policy": null}
+JSON
+      echo "✓ ${env} environment ready (all branches)"
+    fi
+  done
+}
+
+# configure_branch_protection <repo> <required-check-context>...
+configure_branch_protection() {
+  local repo="$1"; shift
+  local checks=("$@")
+
   echo ""
-  echo "==> Locking prod GitHub environment (${GITHUB_REPO}) to 'main'"
-
-  gh api -X PUT "repos/${GITHUB_REPO}/environments/prod" \
-    -F "deployment_branch_policy[protected_branches]=false" \
-    -F "deployment_branch_policy[custom_branch_policies]=true" \
-    >/dev/null
-
-  # Add the 'main' policy only if absent — POST is not idempotent (a duplicate
-  # name 422s).
-  if ! gh api "repos/${GITHUB_REPO}/environments/prod/deployment-branch-policies" \
-      --jq '.branch_policies[].name' 2>/dev/null | grep -qx main; then
-    gh api -X POST "repos/${GITHUB_REPO}/environments/prod/deployment-branch-policies" \
-      -f name=main >/dev/null
+  # Branch protection targets an existing branch; on a repo whose 'main' hasn't
+  # been pushed yet the API 404s. Skip gracefully rather than aborting setup.
+  if ! gh api "repos/${repo}/branches/main" >/dev/null 2>&1; then
+    echo "⊘ 'main' not found on ${repo} yet — skipping branch protection."
+    echo "  Re-run dialed:setup (idempotent) after your first push, or apply it"
+    echo "  by hand (see skill/references/oidc-bootstrap.md)."
+    return 0
   fi
 
-  echo "✓ prod environment locked to main"
-fi
+  echo "==> Protecting default branch 'main' on ${repo}"
+  # Classic branch-protection body. The API requires all four top-level keys
+  # (nullable). strict=true → "require branches to be up to date before merging".
+  # enforce_admins=false → admins may bypass (flip to true to include them).
+  # required_pull_request_reviews with 0 approvals → a PR is required to merge,
+  # but no approving review is mandated (suits a solo maintainer; raise the count
+  # to require reviews). Idempotent: PUT replaces the whole protection rule.
+  local contexts_json
+  contexts_json=$(printf '%s\n' "${checks[@]}" | jq -R . | jq -s .)
+  jq -n --argjson contexts "$contexts_json" '{
+    required_status_checks: { strict: true, contexts: $contexts },
+    enforce_admins: false,
+    required_pull_request_reviews: { required_approving_review_count: 0 },
+    restrictions: null
+  }' | gh api --method PUT "repos/${repo}/branches/main/protection" \
+        -H "Accept: application/vnd.github+json" --input - >/dev/null
+
+  echo "✓ main protected (PR required; strict status checks: ${checks[*]:-none})"
+}
+
+echo ""
+echo "==> Configuring GitHub environments + branch protection"
+configure_environments "${GITHUB_REPO}" "${ENVS[@]}"
+configure_branch_protection "${GITHUB_REPO}" "${REQUIRED_CHECKS[@]}"
 
 # ─── Deploy shared tier per env ─────────────────────────────────────────────
 
