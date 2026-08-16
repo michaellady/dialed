@@ -192,8 +192,19 @@ resource "aws_iam_role_policy" "iam_scoped" {
           "iam:DeleteRolePolicy",
           "iam:AttachRolePolicy",
           "iam:DetachRolePolicy",
+          # iam:PutRolePermissionsBoundary is kept — it can only SET the boundary, and the
+          # StringEquals condition below pins the value to dialed-${project_name}-boundary, so
+          # it can never point a role at a weaker boundary. It's safe.
+          #
+          # iam:DeleteRolePermissionsBoundary is deliberately OMITTED. AWS evaluates the
+          # iam:PermissionsBoundary condition for a Delete against the role's CURRENT boundary,
+          # so this statement WOULD authorize stripping the boundary off any bounded
+          # ${project_name}-* role. That reopens the escalation chain the boundary exists to
+          # close: create a bounded role -> attach AdministratorAccess ->
+          # DeleteRolePermissionsBoundary -> PassRole -> full admin. Teardown never needs it
+          # (bounded roles are removed with iam:DeleteRole in ManageProjectRolesOther, which
+          # deletes the whole role rather than un-bounding it), so dropping it is non-breaking.
           "iam:PutRolePermissionsBoundary",
-          "iam:DeleteRolePermissionsBoundary",
         ]
         Resource = [
           "arn:aws:iam::${var.current_account_id}:role/${var.project_name}-*",
