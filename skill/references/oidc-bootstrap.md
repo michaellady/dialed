@@ -9,7 +9,7 @@ Per AWS account:
 1. GitHub OIDC identity provider (`token.actions.githubusercontent.com`, thumbprint `6938fd4d98bab03faadb97b34396831e3780aea1`, audience `sts.amazonaws.com`).
 2. One IAM role per env that lives in this account — named `dialed-{project}-deploy-{env}` under path `/dialed/` (project-namespaced so multiple DIALED services can share one account; services bootstrapped before this change use the legacy `dialed-deploy-{env}` name).
 3. Each role has:
-   - Trust policy federating GitHub OIDC for the specific repo.
+   - Trust policy federating GitHub OIDC for the specific repo, narrowed to the exact subjects DIALED jobs emit — prod trusts only `repo:<repo>:environment:prod`; dev/staging trust `repo:<repo>:pull_request` + `repo:<repo>:environment:<env>` (no `repo:<repo>:*` wildcard, no bare `ref:refs/heads/main`).
    - Managed policy: `PowerUserAccess`.
    - Inline policy: scoped IAM actions on project-owned roles, with the role-mutation actions gated on `iam:PermissionsBoundary`.
 4. One IAM permissions boundary per account — `dialed-{project}-boundary` (Deny `iam:*`/`organizations:*`/`account:*`, Allow `*`). Every `{project}-*` role the deploy role mints must carry it.
@@ -41,20 +41,26 @@ cat > /tmp/trust.json <<EOF
     "Action": "sts:AssumeRoleWithWebIdentity",
     "Condition": {
       "StringEquals": { "token.actions.githubusercontent.com:aud": "sts.amazonaws.com" },
-      "StringLike": { "token.actions.githubusercontent.com:sub": "repo:${GITHUB_REPO}:*" }
+      "StringLike": { "token.actions.githubusercontent.com:sub": [
+        "repo:${GITHUB_REPO}:pull_request",
+        "repo:${GITHUB_REPO}:environment:${ENV}"
+      ] }
     }
   }]
 }
 EOF
 
-# For prod, replace the StringLike with BOTH the main ref and the
-# environment:prod subject — a job that declares `environment: prod` emits the
-# latter, not a ref, so a role trusting only the ref form fails to assume:
+# The trust is NARROWED to the exact subjects DIALED's jobs emit — NOT a
+# "repo:${GITHUB_REPO}:*" wildcard. The wildcard (and a bare
+# "repo:${GITHUB_REPO}:ref:refs/heads/main") would also admit the subject a
+# comment-triggered / main-branch bot presents (e.g. @claude, which carries
+# id-token:write), letting it assume the deploy role. Non-prod (dev/staging)
+# trusts PR jobs + env-declared jobs. For prod, trust ONLY environment:prod
+# (drop pull_request too):
 #   "StringLike": { "token.actions.githubusercontent.com:sub": [
-#     "repo:${GITHUB_REPO}:ref:refs/heads/main",
 #     "repo:${GITHUB_REPO}:environment:prod"
 #   ] }
-# Trusting environment:prod means the main-only gate is no longer in this trust
+# Because prod no longer trusts a ref, the main-only gate is NOT in this trust
 # policy — you MUST lock the prod GitHub environment to main (see below).
 
 aws iam create-role \
@@ -115,6 +121,47 @@ gh api "repos/OWNER/REPO/environments/prod/deployment-branch-policies" \
 Without this, a non-main branch can `workflow_dispatch` `main-deploy`, hit the
 `deploy-prod` job, present the trusted `environment:prod` subject, and deploy
 non-main code to prod.
+
+## Create the dev / staging environments (no branch policy)
+
+dev (and staging, for 3-env) are PR-driven — their jobs run from PR head
+branches AND main and present either the `pull_request` or the
+`environment:<env>` subject. So those environments must allow **all** branches
+(`deployment_branch_policy: null`). `dialed:setup` creates them; to (re)assert
+by hand:
+
+```bash
+gh api --method PUT "repos/OWNER/REPO/environments/dev" --input - <<'JSON'
+{"deployment_branch_policy": null}
+JSON
+# repeat for staging on a 3-env project
+```
+
+## Protect the default branch `main` (REQUIRED)
+
+Because prod deploys are gated on the `prod` environment's branch policy and the
+whole promotion flow runs on push to `main`, `main` itself must require review +
+green checks before code lands. `dialed:setup` applies this; to (re)assert by
+hand (the required-check **contexts** are workflow job names — confirm they match
+your repo's actual checks):
+
+```bash
+jq -n '{
+  required_status_checks: { strict: true, contexts: [
+    "Unit + integration tests",
+    "Deploy PR stack to dev",
+    "System tests against PR stack"
+  ] },
+  enforce_admins: false,
+  required_pull_request_reviews: { required_approving_review_count: 0 },
+  restrictions: null
+}' | gh api --method PUT "repos/OWNER/REPO/branches/main/protection" \
+      -H "Accept: application/vnd.github+json" --input -
+```
+
+`strict: true` is "require branches to be up to date before merging". Flip
+`enforce_admins` to `true` to include admins. The `main` branch must already
+exist on the remote (push at least once first) or the API 404s.
 
 ## Nuke and re-bootstrap
 

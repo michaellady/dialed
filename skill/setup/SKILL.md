@@ -47,8 +47,9 @@ Questions, in order:
 Before running any AWS commands, summarize the plan for the user and wait for explicit "yes". Include:
 
 - Which accounts get bootstrapped (S3 bucket + DynamoDB table created in each).
-- Which accounts get an OIDC IAM role set (one `dialed-{project}-deploy-{env}` per env) plus the `dialed-{project}-boundary` permissions boundary.
-- That the prod GitHub environment will be created (if absent) and locked to `main` — the branch gate for prod deploys.
+- Which accounts get an OIDC IAM role set (one `dialed-{project}-deploy-{env}` per env) plus the `dialed-{project}-boundary` permissions boundary. Trust is narrowed to the exact subjects DIALED jobs emit: prod trusts only `environment:prod`; dev/staging trust `pull_request` + `environment:<env>` (no `repo:*` wildcard, no bare `ref:refs/heads/main`).
+- That GitHub Environments will be created (if absent): the **prod** environment locked to `main` (the branch gate for prod deploys, since prod trust is env-scoped), and **dev** (plus **staging** for 3-env) with no branch policy.
+- That the default branch `main` will get a protection rule: require a PR + up-to-date passing status checks before merging (required checks default to the DIALED job names — confirm they match this repo's actual check names).
 - If needs_vpc=y: which envs get a VPC created (list with estimated cost: ~$3-5/mo per env with fck-nat, ~$32/mo per env if nat_mode=managed later).
 - Total rough monthly cost estimate.
 
@@ -73,11 +74,21 @@ Stream its output. It will:
 5. For each distinct account ID in `.dialed.yml`, prompt the user to switch AWS credentials to that account, then run:
    - `scripts/bootstrap-state.sh` (idempotent S3 + DDB creation)
    - `terraform apply` on `terraform/bootstrap/` (OIDC provider + deploy roles)
-6. Lock the prod GitHub environment to `main` via `gh api` (creates the `prod`
-   environment if absent, enables custom branch policies, allows only `main`).
-   This is the branch gate for prod: the prod deploy role trusts the
-   `environment:prod` OIDC subject, so main-only is enforced here, not in the
-   AWS trust policy. Idempotent.
+6. Configure GitHub Environments + default-branch protection via `gh api`
+   (idempotent):
+   - **prod** environment: created if absent, custom branch policies enabled,
+     only `main` allowed. This is the branch gate for prod — the prod deploy
+     role trusts the `environment:prod` OIDC subject, so main-only is enforced
+     here, NOT in the AWS trust policy.
+   - **dev** (and **staging** for 3-env) environment: created with
+     `deployment_branch_policy: null` (all branches — they're PR-driven).
+   - **`main` branch protection**: require a PR + strict (up-to-date) passing
+     status checks before merging; `enforce_admins` off. Required-check contexts
+     default to the DIALED job names (`Unit + integration tests`, `Deploy PR
+     stack to dev`, `System tests against PR stack`) or `.dialed.yml`'s
+     `branch_protection.required_checks`. Skipped with a warning if `main`
+     hasn't been pushed yet — re-run setup after the first push. Confirm the
+     contexts match the repo's real check names.
 7. If `needs_vpc=y`, for each env, switch credentials to its account and run `terraform apply` on `terraform/shared/` after confirming cost.
 
 ## After setup.sh succeeds

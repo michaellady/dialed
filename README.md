@@ -9,7 +9,8 @@ A Claude Code skill that bootstraps GitHub Actions + Terraform + AWS deployment 
 - **Per-PR stacks.** Every PR gets its own isolated Terraform workspace in the dev AWS account. Open a PR, a real stack comes up; close the PR, it tears down.
 - **Staged tests.** Unit + integration pre-deploy (fast fail), system tests against the live PR stack, smoke tests post-prod.
 - **Dev → prod promotion.** Merge to main auto-deploys through dev (and optionally staging) into prod.
-- **AWS OIDC.** No long-lived access keys in GitHub secrets.
+- **AWS OIDC, least-privilege.** No long-lived access keys in GitHub secrets. Deploy-role trust is narrowed to the exact OIDC subjects DIALED jobs emit (prod: `environment:prod` only; dev/staging: `pull_request` + `environment:<env>`), so a comment-triggered / main-branch bot can't assume a deploy role.
+- **Environment + branch gating.** Setup creates GitHub Environments (prod locked to `main`, the branch gate for prod deploys) and a default-branch protection rule (PR + up-to-date passing checks required to merge).
 - **Foundational VPC included.** Shared network tier with fck-nat (~$3–5/mo) so PR stacks can live inside a long-lived VPC without re-creating one each time.
 
 Stack-shape agnostic — DIALED scaffolds the pipeline and the wiring; you fill in the Terraform for whatever your app actually is.
@@ -56,6 +57,7 @@ Once OIDC is bootstrapped, day-to-day deploys use the scoped `dialed-<project>-d
 **GitHub permissions**:
 
 - Push access to the consumer repository.
+- **Admin** rights on the repo — setup creates GitHub Environments (prod locked to `main`; dev/staging open) and a `main` branch-protection rule via `gh api`. Without admin these calls fail.
 - Workflow permissions allow `id-token: write` (default on most repos; confirm under `Settings → Actions → General → Workflow permissions`).
 - No static GitHub secrets for AWS — OIDC replaces `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`.
 
