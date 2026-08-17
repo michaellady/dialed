@@ -12,6 +12,12 @@ resource "aws_iam_role" "cleanup_lambda" {
   name = "${local.name_prefix}-cleanup-lambda"
   path = "/dialed/"
 
+  # Minted WITH the project's boundary — the bootstrap deploy role's
+  # iam:CreateRole is gated on iam:PermissionsBoundary. Unlike the fck-nat role,
+  # this Lambda exists for every service (needs_vpc true or false), so an
+  # unbounded role here would AccessDeny on every shared-tier apply.
+  permissions_boundary = local.permissions_boundary_arn
+
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
