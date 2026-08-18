@@ -60,6 +60,13 @@ jobs:
           bucket="dialed-${DIALED_PROJECT_NAME}-${DIALED_ACCOUNT_ID}-tfstate"
           cutoff=$(date -u -d '2 hours ago' '+%Y-%m-%dT%H:%M:%S+00:00')
           orphans=""
+          # List FIRST as its own checked command: an AWS failure (AccessDenied,
+          # missing bucket, expired creds) must fail the job — piping straight
+          # into the filter would mask it as "zero orphans" and the janitor
+          # would green-light while doing nothing. Only grep's no-match is
+          # tolerated after a successful listing.
+          listing=$(aws s3api list-objects-v2 --bucket "$bucket" --prefix 'env:/dev-pr-' \
+                      --query 'Contents[].[Key,LastModified]' --output text)
           while IFS=$'\t' read -r key modified; do
             [[ "$key" =~ ^env:/(dev-pr-([0-9]+))/stack/terraform\.tfstate$ ]] || continue
             ws="${BASH_REMATCH[1]}"; n="${BASH_REMATCH[2]}"
@@ -74,8 +81,7 @@ jobs:
               echo "ORPHAN ${ws} — PR #${n} is ${state}"
               orphans="${orphans} ${n}"
             fi
-          done < <(aws s3api list-objects-v2 --bucket "$bucket" --prefix 'env:/dev-pr-' \
-                     --query 'Contents[].[Key,LastModified]' --output text | grep -F '/stack/terraform.tfstate' || true)
+          done < <(grep -F '/stack/terraform.tfstate' <<<"$listing" || true)
           echo "orphans=${orphans}" >> "$GITHUB_OUTPUT"
           echo "Orphans:${orphans:- none}"
 
@@ -104,10 +110,17 @@ jobs:
               echo "destroy attempt ${attempt} failed for ${ws}; sleeping 60s"
               sleep 60
             done
-            terraform workspace select default
+            # One bad workspace must not abort the batch: guard everything after
+            # the destroy so remaining orphans still get swept and the summary
+            # + failure report still render.
+            terraform workspace select default || true
             if [ "$ok" = true ]; then
-              terraform workspace delete "$ws"
-              echo "cleaned ${ws}"
+              if terraform workspace delete "$ws"; then
+                echo "cleaned ${ws}"
+              else
+                echo "destroyed ${ws} but workspace delete failed — retained for inspection"
+                failed="${failed} ${ws}"
+              fi
             else
               failed="${failed} ${ws}"
               # Same fallback as pr-cleanup: the shared tier's orphan-cleanup
