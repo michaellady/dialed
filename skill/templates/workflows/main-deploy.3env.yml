@@ -9,6 +9,15 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Serialize the WHOLE promotion chain per repo: without this, only the apply
+# jobs held a lock, so commit B's deploy-dev could overwrite the dev stack
+# while commit A's system tests were still running — promoting A to prod
+# validated against B's deployment. One run at a time; a newer queued run
+# supersedes an older pending one (never a running one).
+concurrency:
+  group: dialed-main-deploy
+  cancel-in-progress: false
+
 permissions:
   id-token: write
   contents: read
@@ -69,7 +78,23 @@ jobs:
         id: stack
         working-directory: terraform/stack
         run: |
-          url=$(terraform output -raw stack_url 2>/dev/null || echo "")
+          # Distinguish "no stack_url output defined" (legitimate URL-less
+          # service → empty) from any OTHER terraform failure (broken backend,
+          # bad state), which must fail the job rather than silently emptying
+          # the URL and degrading the downstream gates.
+          set +e
+          url=$(terraform output -raw stack_url 2>/tmp/stack-url.err)
+          status=$?
+          set -e
+          if [ $status -ne 0 ]; then
+            if grep -qiE 'output "stack_url" not found|no outputs found' /tmp/stack-url.err; then
+              url=""
+            else
+              cat /tmp/stack-url.err >&2
+              echo "::error::terraform output failed for a reason other than a missing stack_url output"
+              exit 1
+            fi
+          fi
           echo "url=${url}" >> "$GITHUB_OUTPUT"
       - name: Wait for readiness
         env:
@@ -85,16 +110,28 @@ jobs:
     runs-on: ubuntu-latest
     # environment:dev — see unit-and-integration; keeps the OIDC subject env-scoped.
     environment: dev
-    if: needs.deploy-dev.outputs.stack_url != ''
+    # No job-level stack_url condition: a skipped gate propagates skip down the
+    # whole needs chain (staging, prod, release), so a broken/absent URL would
+    # silently stop main from ever reaching prod. The gate ALWAYS runs; the
+    # step decides no-op / fail / test.
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dialed-setup
         with:
           env: dev
-      - if: env.DIALED_TEST_SYSTEM_CMD != ''
+      - name: System tests
         env:
           STACK_URL: ${{ needs.deploy-dev.outputs.stack_url }}
-        run: eval "$DIALED_TEST_SYSTEM_CMD"
+        run: |
+          if [ -z "${DIALED_TEST_SYSTEM_CMD:-}" ]; then
+            echo "No system-test command configured — gate passes as a no-op."
+            exit 0
+          fi
+          if [ -z "${STACK_URL}" ]; then
+            echo "::error::DIALED_TEST_SYSTEM_CMD is configured but deploy-dev produced no stack_url — failing the gate instead of skipping it."
+            exit 1
+          fi
+          eval "$DIALED_TEST_SYSTEM_CMD"
 
   deploy-staging:
     name: Deploy to staging
@@ -129,7 +166,23 @@ jobs:
         id: stack
         working-directory: terraform/stack
         run: |
-          url=$(terraform output -raw stack_url 2>/dev/null || echo "")
+          # Distinguish "no stack_url output defined" (legitimate URL-less
+          # service → empty) from any OTHER terraform failure (broken backend,
+          # bad state), which must fail the job rather than silently emptying
+          # the URL and degrading the downstream gates.
+          set +e
+          url=$(terraform output -raw stack_url 2>/tmp/stack-url.err)
+          status=$?
+          set -e
+          if [ $status -ne 0 ]; then
+            if grep -qiE 'output "stack_url" not found|no outputs found' /tmp/stack-url.err; then
+              url=""
+            else
+              cat /tmp/stack-url.err >&2
+              echo "::error::terraform output failed for a reason other than a missing stack_url output"
+              exit 1
+            fi
+          fi
           echo "url=${url}" >> "$GITHUB_OUTPUT"
       - name: Wait for readiness
         env:
@@ -146,22 +199,26 @@ jobs:
     # environment:staging so this job's OIDC subject is repo:<r>:environment:staging,
     # which the narrowed non-prod trust admits (the bare ref does not).
     environment: staging
-    if: needs.deploy-staging.outputs.stack_url != ''
+    # Always runs (no job-level stack_url condition) — see system-test-dev.
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dialed-setup
         with:
           env: staging
-      - name: System tests
-        if: env.DIALED_TEST_SYSTEM_CMD != ''
+      - name: System + smoke tests
         env:
           STACK_URL: ${{ needs.deploy-staging.outputs.stack_url }}
-        run: eval "$DIALED_TEST_SYSTEM_CMD"
-      - name: Smoke tests
-        if: env.DIALED_TEST_SMOKE_CMD != ''
-        env:
-          STACK_URL: ${{ needs.deploy-staging.outputs.stack_url }}
-        run: eval "$DIALED_TEST_SMOKE_CMD"
+        run: |
+          if [ -z "${DIALED_TEST_SYSTEM_CMD:-}" ] && [ -z "${DIALED_TEST_SMOKE_CMD:-}" ]; then
+            echo "No system/smoke-test commands configured — gate passes as a no-op."
+            exit 0
+          fi
+          if [ -z "${STACK_URL}" ]; then
+            echo "::error::staging tests are configured but deploy-staging produced no stack_url — failing the gate instead of skipping it."
+            exit 1
+          fi
+          if [ -n "${DIALED_TEST_SYSTEM_CMD:-}" ]; then eval "$DIALED_TEST_SYSTEM_CMD"; fi
+          if [ -n "${DIALED_TEST_SMOKE_CMD:-}" ]; then eval "$DIALED_TEST_SMOKE_CMD"; fi
 
   deploy-prod:
     name: Deploy to prod
@@ -196,7 +253,23 @@ jobs:
         id: stack
         working-directory: terraform/stack
         run: |
-          url=$(terraform output -raw stack_url 2>/dev/null || echo "")
+          # Distinguish "no stack_url output defined" (legitimate URL-less
+          # service → empty) from any OTHER terraform failure (broken backend,
+          # bad state), which must fail the job rather than silently emptying
+          # the URL and degrading the downstream gates.
+          set +e
+          url=$(terraform output -raw stack_url 2>/tmp/stack-url.err)
+          status=$?
+          set -e
+          if [ $status -ne 0 ]; then
+            if grep -qiE 'output "stack_url" not found|no outputs found' /tmp/stack-url.err; then
+              url=""
+            else
+              cat /tmp/stack-url.err >&2
+              echo "::error::terraform output failed for a reason other than a missing stack_url output"
+              exit 1
+            fi
+          fi
           echo "url=${url}" >> "$GITHUB_OUTPUT"
       - name: Wait for readiness
         env:
@@ -214,16 +287,25 @@ jobs:
     # The narrowed prod trust (bootstrap/main.tf) trusts ONLY that subject — the
     # bare ref:refs/heads/main was removed — so this job MUST declare the env.
     environment: prod
-    if: needs.deploy-prod.outputs.stack_url != ''
+    # Always runs (no job-level stack_url condition) — see system-test-dev.
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dialed-setup
         with:
           env: prod
-      - if: env.DIALED_TEST_SMOKE_CMD != ''
+      - name: Smoke tests
         env:
           STACK_URL: ${{ needs.deploy-prod.outputs.stack_url }}
-        run: eval "$DIALED_TEST_SMOKE_CMD"
+        run: |
+          if [ -z "${DIALED_TEST_SMOKE_CMD:-}" ]; then
+            echo "No smoke-test command configured — gate passes as a no-op."
+            exit 0
+          fi
+          if [ -z "${STACK_URL}" ]; then
+            echo "::error::DIALED_TEST_SMOKE_CMD is configured but deploy-prod produced no stack_url — failing the gate instead of skipping it."
+            exit 1
+          fi
+          eval "$DIALED_TEST_SMOKE_CMD"
 
   # ─── Release: the "prod is live" event ────────────────────────────────────────────────
   #
@@ -249,9 +331,9 @@ jobs:
   release:
     name: Release (prod is live)
     needs: [deploy-prod, smoke-test-prod]
-    # smoke-test-prod is skipped when the stack exposes no URL — release on deploy
-    # success with smoke green-or-skipped, never after a failure or cancellation.
-    if: ${{ !cancelled() && needs.deploy-prod.result == 'success' && (needs.smoke-test-prod.result == 'success' || needs.smoke-test-prod.result == 'skipped') }}
+    # smoke-test-prod always runs now (no-op when unconfigured), so release
+    # requires BOTH green — never after a failure, skip, or cancellation.
+    if: ${{ !cancelled() && needs.deploy-prod.result == 'success' && needs.smoke-test-prod.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write # create the tag + release

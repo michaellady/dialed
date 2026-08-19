@@ -1,0 +1,146 @@
+name: PR Workspace Janitor
+
+# Weekly sweep for orphaned PR stacks — workspaces whose PR is closed but whose
+# `terraform destroy` never completed. pr-cleanup handles the happy path on PR
+# close; this catches the leftovers (destroy failed all retries, AWS outage,
+# force-close), which otherwise linger silently as roles/lambdas/SGs/state.
+#
+# The job MUST be gated behind the `dev` GitHub Environment: the narrowed dev
+# deploy-role OIDC trust admits only `pull_request` and `environment:dev`
+# subjects, and a schedule/workflow_dispatch run would otherwise present a
+# `ref:refs/heads/main` subject the trust rejects. The environment gate also
+# makes workflow_dispatch the supported manual-cleanup path (pr-cleanup's own
+# workflow_dispatch predates the narrowing and cannot assume the role).
+#
+# Safety: only touches workspaces named dev-pr-<N> where PR #N is closed AND
+# the state object hasn't changed in 2+ hours, so it never races an in-flight
+# pr-cleanup or deploy; DynamoDB state locking backstops any remaining race.
+
+on:
+  schedule:
+    - cron: "17 9 * * 1" # Mondays 09:17 UTC
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: dialed-janitor-dev
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    name: Sweep orphaned PR workspaces
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/dialed-setup
+        with:
+          env: dev
+
+      - name: Terraform init (stack)
+        working-directory: terraform/stack
+        run: |
+          terraform init \
+            -backend-config="bucket=dialed-${DIALED_PROJECT_NAME}-${DIALED_ACCOUNT_ID}-tfstate" \
+            -backend-config="key=stack/terraform.tfstate" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="dynamodb_table=dialed-${DIALED_PROJECT_NAME}-${DIALED_ACCOUNT_ID}-tflocks" \
+            -backend-config="encrypt=true"
+
+      - name: Find orphaned PR workspaces
+        id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          bucket="dialed-${DIALED_PROJECT_NAME}-${DIALED_ACCOUNT_ID}-tfstate"
+          cutoff=$(date -u -d '2 hours ago' '+%Y-%m-%dT%H:%M:%S+00:00')
+          orphans=""
+          # List FIRST as its own checked command: an AWS failure (AccessDenied,
+          # missing bucket, expired creds) must fail the job — piping straight
+          # into the filter would mask it as "zero orphans" and the janitor
+          # would green-light while doing nothing. Only grep's no-match is
+          # tolerated after a successful listing.
+          listing=$(aws s3api list-objects-v2 --bucket "$bucket" --prefix 'env:/dev-pr-' \
+                      --query 'Contents[].[Key,LastModified]' --output text)
+          while IFS=$'\t' read -r key modified; do
+            [[ "$key" =~ ^env:/(dev-pr-([0-9]+))/stack/terraform\.tfstate$ ]] || continue
+            ws="${BASH_REMATCH[1]}"; n="${BASH_REMATCH[2]}"
+            state=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${n}" --jq .state 2>/dev/null || echo unknown)
+            if [ "$state" = "open" ]; then
+              echo "keep ${ws} — PR #${n} is open"
+            elif [ "$state" = "unknown" ]; then
+              echo "keep ${ws} — could not read PR #${n} state"
+            elif [[ "$modified" > "$cutoff" ]]; then
+              echo "keep ${ws} — state modified <2h ago (cleanup/deploy may be in flight)"
+            else
+              echo "ORPHAN ${ws} — PR #${n} is ${state}"
+              orphans="${orphans} ${n}"
+            fi
+          done < <(grep -F '/stack/terraform.tfstate' <<<"$listing" || true)
+          echo "orphans=${orphans}" >> "$GITHUB_OUTPUT"
+          echo "Orphans:${orphans:- none}"
+
+      - name: Copy auto-tfvars into stack dir
+        if: steps.find.outputs.orphans != ''
+        run: cp .dialed-cache/dialed.auto.tfvars.json terraform/stack/dialed.auto.tfvars.json
+
+      - name: Destroy orphaned workspaces
+        if: steps.find.outputs.orphans != ''
+        working-directory: terraform/stack
+        run: |
+          set -euo pipefail
+          failed=""
+          for n in ${{ steps.find.outputs.orphans }}; do
+            ws="dev-pr-${n}"
+            echo "::group::destroy ${ws}"
+            if ! terraform workspace select "$ws"; then
+              echo "could not select ${ws}"; failed="${failed} ${ws}"; echo "::endgroup::"; continue
+            fi
+            ok=false
+            for attempt in 1 2; do
+              if terraform destroy -auto-approve -input=false \
+                   -var "environment=${DIALED_ENV}" -var "pr_number=${n}"; then
+                ok=true; break
+              fi
+              echo "destroy attempt ${attempt} failed for ${ws}; sleeping 60s"
+              sleep 60
+            done
+            # One bad workspace must not abort the batch: guard everything after
+            # the destroy so remaining orphans still get swept and the summary
+            # + failure report still render.
+            terraform workspace select default || true
+            if [ "$ok" = true ]; then
+              if terraform workspace delete "$ws"; then
+                echo "cleaned ${ws}"
+              else
+                echo "destroyed ${ws} but workspace delete failed — retained for inspection"
+                failed="${failed} ${ws}"
+              fi
+            else
+              failed="${failed} ${ws}"
+              # Same fallback as pr-cleanup: the shared tier's orphan-cleanup
+              # Lambda releases stuck ENIs/SGs so a later sweep can finish.
+              cleanup_fn="dialed-${DIALED_PROJECT_NAME}-cleanup-${DIALED_ENV}"
+              if aws lambda get-function --function-name "$cleanup_fn" >/dev/null 2>&1; then
+                payload=$(printf '{"workspace":"%s","pr_number":"%s","environment":"%s"}' "$ws" "$n" "${DIALED_ENV}")
+                aws lambda invoke --function-name "$cleanup_fn" \
+                  --cli-binary-format raw-in-base64-out --payload "$payload" "/tmp/cleanup-${n}.json" || true
+                cat "/tmp/cleanup-${n}.json" 2>/dev/null || true
+              fi
+            fi
+            echo "::endgroup::"
+          done
+          {
+            echo "## PR workspace janitor"
+            echo "- swept:${{ steps.find.outputs.orphans }}"
+            echo "- failed:${failed:- none}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$failed" ]; then
+            echo "::error::janitor could not destroy:${failed} — retained for manual inspection (next weekly run retries)"
+            exit 1
+          fi

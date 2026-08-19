@@ -9,6 +9,11 @@ on:
   pull_request:
     types: [closed]
     branches: [main]
+  # NOTE: manual dispatch of THIS workflow cannot assume the deploy role — a
+  # workflow_dispatch run presents a ref-based OIDC subject, which the narrowed
+  # trust (bootstrap/main.tf) no longer admits. For manual orphan cleanup use
+  # pr-janitor.yml's workflow_dispatch instead: that job is gated behind the
+  # dev GitHub Environment, so its subject IS admitted.
   workflow_dispatch:
     inputs:
       pr_number:

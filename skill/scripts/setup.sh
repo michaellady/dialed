@@ -90,6 +90,7 @@ mkdir -p .github/workflows .github/actions
 
 cp "$DIALED_HOME/skill/templates/workflows/pr-deploy.yml" .github/workflows/
 cp "$DIALED_HOME/skill/templates/workflows/pr-cleanup.yml" .github/workflows/
+cp "$DIALED_HOME/skill/templates/workflows/pr-janitor.yml" .github/workflows/
 cp "$DIALED_HOME/skill/templates/workflows/test.yml" .github/workflows/
 cp "$DIALED_HOME/skill/templates/workflows/main-deploy.${MODEL_SLUG}.yml" .github/workflows/main-deploy.yml
 cp "$DIALED_HOME/skill/templates/workflows/release-summary.yml" .github/workflows/
@@ -205,14 +206,35 @@ configure_environments() {
         -F "deployment_branch_policy[protected_branches]=false" \
         -F "deployment_branch_policy[custom_branch_policies]=true" \
         >/dev/null
-      # Add the 'main' policy only if absent — POST is not idempotent (a
-      # duplicate name 422s).
+      # Reconcile to EXACTLY one policy: {name: main, type: branch}. This
+      # policy is the load-bearing prod gate under the narrowed OIDC trust, so
+      # a stale wildcard/extra/tag policy surviving here would let non-main
+      # refs enter environment:prod and assume the prod deploy role. Delete
+      # everything that isn't the main BRANCH policy (a TAG named 'main' does
+      # not count), then create it if absent, then verify or fail.
+      gh api "repos/${repo}/environments/prod/deployment-branch-policies" \
+        --jq '.branch_policies[] | [(.id|tostring), .name, (.type // "branch")] | @tsv' 2>/dev/null |
+      while IFS=$'\t' read -r pid pname ptype; do
+        [ -n "$pid" ] || continue
+        if [ "$pname" = "main" ] && [ "$ptype" = "branch" ]; then continue; fi
+        echo "  deleting stale prod deployment policy: ${pname} (${ptype})"
+        gh api --method DELETE \
+          "repos/${repo}/environments/prod/deployment-branch-policies/${pid}" >/dev/null
+      done
       if ! gh api "repos/${repo}/environments/prod/deployment-branch-policies" \
-          --jq '.branch_policies[].name' 2>/dev/null | grep -qx main; then
+          --jq '.branch_policies[] | select((.type // "branch") == "branch") | .name' 2>/dev/null | grep -qx main; then
         gh api --method POST "repos/${repo}/environments/prod/deployment-branch-policies" \
-          -f name=main >/dev/null
+          -f name=main -f type=branch >/dev/null
       fi
-      echo "✓ prod environment locked to main"
+      # Read back and fail setup unless the surviving set is exactly the
+      # singleton — a silent partial reconciliation must not report success.
+      final=$(gh api "repos/${repo}/environments/prod/deployment-branch-policies" \
+        --jq '[.branch_policies[] | .name + "/" + (.type // "branch")] | sort | join(",")')
+      if [ "$final" != "main/branch" ]; then
+        echo "ERROR: prod deployment policies are '${final}'; expected exactly 'main/branch'." >&2
+        exit 1
+      fi
+      echo "✓ prod environment locked to main (verified singleton policy)"
     else
       echo ""
       echo "==> Creating '${env}' GitHub environment (${repo}) — no branch policy"

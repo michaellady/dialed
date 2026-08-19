@@ -60,16 +60,24 @@ create_bucket() {
   local bucket="$1"
   if aws s3api head-bucket --bucket "$bucket" 2>/dev/null; then
     echo "✓ bucket exists: $bucket"
-    return 0
-  fi
-  echo "→ creating bucket: $bucket"
-  # us-east-1 rejects LocationConstraint; other regions require it.
-  if [ "$REGION" = "us-east-1" ]; then
-    aws s3api create-bucket --bucket "$bucket" --region "$REGION" >/dev/null
   else
-    aws s3api create-bucket --bucket "$bucket" --region "$REGION" \
-      --create-bucket-configuration "LocationConstraint=$REGION" >/dev/null
+    echo "→ creating bucket: $bucket"
+    # us-east-1 rejects LocationConstraint; other regions require it.
+    if [ "$REGION" = "us-east-1" ]; then
+      aws s3api create-bucket --bucket "$bucket" --region "$REGION" >/dev/null
+    else
+      aws s3api create-bucket --bucket "$bucket" --region "$REGION" \
+        --create-bucket-configuration "LocationConstraint=$REGION" >/dev/null
+    fi
   fi
+  # Hardening runs on EVERY invocation (all calls are idempotent PUTs), so an
+  # existing bucket is reconciled too — not just buckets created this run.
+  harden_bucket "$bucket"
+  echo "✓ bucket ready: $bucket"
+}
+
+harden_bucket() {
+  local bucket="$1"
   aws s3api put-bucket-versioning --bucket "$bucket" \
     --versioning-configuration Status=Enabled >/dev/null
   aws s3api put-bucket-encryption --bucket "$bucket" \
@@ -78,7 +86,47 @@ create_bucket() {
   aws s3api put-public-access-block --bucket "$bucket" \
     --public-access-block-configuration \
       'BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true' >/dev/null
-  echo "✓ bucket ready: $bucket"
+  # State buckets hold terraform state, which stores secrets in cleartext, and
+  # every DIALED deploy role carries PowerUserAccess — so without this policy
+  # any OTHER service's CI in the same account can read this service's state.
+  # Two deny statements: TLS-only transport, and a deny for every dialed deploy
+  # role that is not THIS project's. Deny on aws:PrincipalArn uses the IAM
+  # role-ARN glob form (an STS session-ARN match fails open). The second glob
+  # covers legacy un-prefixed roles (dialed-deploy-<env>).
+  aws s3api put-bucket-policy --bucket "$bucket" --policy "$(cat <<POLICY
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyInsecureTransport",
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": "s3:*",
+      "Resource": ["arn:aws:s3:::${bucket}", "arn:aws:s3:::${bucket}/*"],
+      "Condition": {"Bool": {"aws:SecureTransport": "false"}}
+    },
+    {
+      "Sid": "DenyCrossServiceDeployRoles",
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": "s3:*",
+      "Resource": ["arn:aws:s3:::${bucket}", "arn:aws:s3:::${bucket}/*"],
+      "Condition": {
+        "StringLike": {
+          "aws:PrincipalArn": [
+            "arn:aws:iam::${ACCOUNT_ID}:role/dialed/dialed-*-deploy-*",
+            "arn:aws:iam::${ACCOUNT_ID}:role/dialed/dialed-deploy-*"
+          ]
+        },
+        "StringNotLike": {
+          "aws:PrincipalArn": "arn:aws:iam::${ACCOUNT_ID}:role/dialed/dialed-${PROJECT}-deploy-*"
+        }
+      }
+    }
+  ]
+}
+POLICY
+)" >/dev/null
 }
 
 create_lock_table() {
