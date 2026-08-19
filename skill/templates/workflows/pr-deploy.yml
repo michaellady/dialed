@@ -94,7 +94,24 @@ jobs:
         id: stack
         working-directory: terraform/stack
         run: |
-          url=$(terraform output -raw stack_url 2>/dev/null || echo "")
+          # Distinguish "no stack_url output defined" (legitimate URL-less
+          # service → empty) from any OTHER terraform failure, which must fail
+          # the job — an empty URL from a swallowed error would skip the
+          # required system-test check, and skipped required checks satisfy
+          # branch protection.
+          set +e
+          url=$(terraform output -raw stack_url 2>/tmp/stack-url.err)
+          status=$?
+          set -e
+          if [ $status -ne 0 ]; then
+            if grep -qiE 'output "stack_url" not found|no outputs found' /tmp/stack-url.err; then
+              url=""
+            else
+              cat /tmp/stack-url.err >&2
+              echo "::error::terraform output failed for a reason other than a missing stack_url output"
+              exit 1
+            fi
+          fi
           echo "url=${url}" >> "$GITHUB_OUTPUT"
           echo "Stack URL: ${url}"
 
@@ -133,14 +150,25 @@ jobs:
     name: System tests against PR stack
     runs-on: ubuntu-latest
     needs: deploy
-    if: needs.deploy.outputs.stack_url != ''
+    # No job-level stack_url condition: this job is a REQUIRED branch-protection
+    # check, and GitHub treats a skipped required check as satisfied — so
+    # skipping on a missing URL would let PRs merge green with zero system
+    # tests. The job ALWAYS runs; the step decides no-op / fail / test.
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/dialed-setup
         with:
           env: dev
       - name: Run system tests
-        if: env.DIALED_TEST_SYSTEM_CMD != ''
         env:
           STACK_URL: ${{ needs.deploy.outputs.stack_url }}
-        run: eval "$DIALED_TEST_SYSTEM_CMD"
+        run: |
+          if [ -z "${DIALED_TEST_SYSTEM_CMD:-}" ]; then
+            echo "No system-test command configured — required check passes as a no-op."
+            exit 0
+          fi
+          if [ -z "${STACK_URL}" ]; then
+            echo "::error::DIALED_TEST_SYSTEM_CMD is configured but the deploy produced no stack_url — failing the required check instead of skipping it."
+            exit 1
+          fi
+          eval "$DIALED_TEST_SYSTEM_CMD"
