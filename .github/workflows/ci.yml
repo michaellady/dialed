@@ -55,6 +55,21 @@ jobs:
           done
           exit $failed
 
+  iam-boundary-lint:
+    name: iam boundary lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache-dependency-path: tools/tfboundary-lint/go.sum
+      - name: Assert every deploy-applied IAM role sets a permissions_boundary
+        run: |
+          cd tools/tfboundary-lint
+          go test ./...
+          go run . ../../skill/templates/terraform
+
   bash-syntax:
     name: bash -n (scripts)
     runs-on: ubuntu-latest
