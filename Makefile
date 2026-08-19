@@ -94,6 +94,13 @@ test:
 		echo "no tests/fixtures/dialed.yml — skipping"; \
 	fi
 	@echo ""
+	@echo "=== iam boundary lint ==="
+	@if command -v go >/dev/null 2>&1; then \
+		(cd tools/tfboundary-lint && go run . ../../skill/templates/terraform) || exit 1; \
+	else \
+		echo "go not installed; skipping"; \
+	fi
+	@echo ""
 	@echo "All checks passed."
 
 fmt:
